@@ -1,0 +1,605 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { GameNarrator } from "@/components/audio/GameNarrator";
+
+type StoryBeat = {
+  title?: string;
+  text?: string;
+  voiceText?: string;
+};
+
+type StoryData = {
+  discoveryTitle?: string;
+  locationType?: string;
+  subject?: string;
+  confidence?: number;
+  historicalStory?: string;
+
+  storyBeats?: StoryBeat[];
+
+  characterOpening?: string;
+
+  storyQuestion?: string;
+  storyQuestionOptions?: string[];
+  storyQuestionAnswer?: number;
+  storyQuestionExplanation?: string;
+
+  curiosityQuestions?: string[];
+
+  riddleTitle?: string;
+  riddle?: string;
+  clue?: string;
+  objective?: string;
+  targetHint?: string;
+
+  rewardXp?: number;
+
+  characterName?: string;
+};
+
+type Character = {
+  src: string;
+  name?: string;
+};
+
+type CinematicDiscoveryStoryProps = {
+  story: StoryData;
+  playerName: string;
+  character: Character;
+  discoveryCount: number;
+  onMission: () => void;
+  onTarget: () => void;
+  onFinished: (correct: boolean) => void;
+  onClose?: () => void;
+};
+
+type Screen =
+  | "story"
+  | "question"
+  | "reaction"
+  | "next"
+  | "more";
+
+export default function CinematicDiscoveryStory({
+  story,
+  playerName,
+  character,
+  discoveryCount,
+  onMission,
+  onTarget,
+  onFinished,
+  onClose,
+}: CinematicDiscoveryStoryProps) {
+  const [screen, setScreen] = useState<Screen>("story");
+  const [beatIndex, setBeatIndex] = useState(0);
+  const [answer, setAnswer] = useState<number | null>(null);
+  const [moreQuestion, setMoreQuestion] = useState<string | null>(null);
+  const [moreAnswer, setMoreAnswer] = useState("");
+
+  const beats = useMemo(() => {
+    const available =
+      story.storyBeats?.filter(
+        (beat) => beat.text || beat.voiceText,
+      ) ?? [];
+
+    if (available.length > 0) {
+      return available.slice(0, 3);
+    }
+
+    return [
+      {
+        title: "THE DISCOVERY",
+        text:
+          story.historicalStory ||
+          "The camera found something worth investigating.",
+        voiceText:
+          story.historicalStory ||
+          "The camera found something worth investigating.",
+      },
+    ];
+  }, [story]);
+
+  const beat = beats[Math.min(beatIndex, beats.length - 1)];
+
+  const isLastBeat = beatIndex >= beats.length - 1;
+
+  const questionOptions =
+    story.storyQuestionOptions?.length === 4
+      ? story.storyQuestionOptions
+      : [
+          "The detail described in the story",
+          "Something unrelated to the discovery",
+          "A detail the camera could not establish",
+          "None of these",
+        ];
+
+  const correct =
+    answer !== null &&
+    answer === story.storyQuestionAnswer;
+
+  useEffect(() => {
+    setScreen("story");
+    setBeatIndex(0);
+    setAnswer(null);
+    setMoreQuestion(null);
+    setMoreAnswer("");
+  }, [story]);
+
+  const askMore = async (question: string) => {
+    setMoreQuestion(question);
+    setMoreAnswer("");
+
+    try {
+      const response = await fetch("/api/curiosity", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question,
+          playerName,
+          story,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.answer) {
+        setMoreAnswer(data.answer);
+      } else {
+        setMoreAnswer(
+          "The Watcher could not establish that detail with enough confidence yet.",
+        );
+      }
+    } catch {
+      setMoreAnswer(
+        "The Watcher could not establish that detail with enough confidence yet.",
+      );
+    }
+  };
+
+  return (
+    <section className="ru-cinematic-story">
+      <div className="ru-story-vignette" />
+
+      <div className="ru-cinematic-top">
+        <span>REALITY UNKNOWN</span>
+
+        <span>
+          DISCOVERY{" "}
+          {String(discoveryCount).padStart(2, "0")}
+        </span>
+
+        <span>
+          {screen === "story"
+            ? `${String(beatIndex + 1).padStart(2, "0")} / ${String(
+                beats.length,
+              ).padStart(2, "0")}`
+            : screen === "question"
+              ? "MEMORY TEST"
+              : screen === "reaction"
+                ? "RESULT"
+                : screen === "more"
+                  ? "THE WATCHER"
+                  : "NEXT MOVE"}
+        </span>
+      </div>
+
+      {screen === "story" && (
+        <div className="ru-cinematic-content">
+          <aside className="ru-cinematic-character">
+            <div className="ru-character-ring" />
+
+            <img
+              src={character.src}
+              alt=""
+            />
+
+            <div className="ru-cinematic-character-name">
+              {character.name || "THE WATCHER"}
+            </div>
+
+            <div className="ru-character-live">
+              <span />
+              CONNECTED TO REALITY
+            </div>
+          </aside>
+
+          <main className="ru-cinematic-dialogue">
+            <div className="ru-cinematic-label">
+              THE WATCHER / DISCOVERY
+            </div>
+
+            <h1>
+              {story.discoveryTitle ||
+                story.subject ||
+                "A discovery"}
+            </h1>
+
+            <p className="ru-cinematic-subject">
+              {story.subject || "WORLD OBSERVATION"}
+            </p>
+
+            {beatIndex === 0 &&
+              story.characterOpening && (
+                <div className="ru-watcher-quote">
+                  <span>THE WATCHER</span>
+                  <p>{story.characterOpening}</p>
+                </div>
+              )}
+
+            <div className="ru-dialogue-panel">
+              <div className="ru-dialogue-progress">
+                {beats.map((_, index) => (
+                  <span
+                    key={index}
+                    className={
+                      index <= beatIndex
+                        ? "active"
+                        : ""
+                    }
+                  />
+                ))}
+              </div>
+
+              <span className="ru-dialogue-kicker">
+                {beat?.title || "THE DISCOVERY"}
+              </span>
+
+              <p className="ru-dialogue-text">
+                {beat?.text}
+              </p>
+
+              <div className="ru-dialogue-footer">
+                <GameNarrator
+                  key={`beat-${beatIndex}`}
+                  text={
+                    beat?.voiceText ||
+                    beat?.text ||
+                    ""
+                  }
+                  autoPlay
+                />
+
+                <button
+                  type="button"
+                  className="ru-primary-next"
+                  onClick={() => {
+                    if (!isLastBeat) {
+                      setBeatIndex(
+                        (value) => value + 1,
+                      );
+                    } else {
+                      setScreen("question");
+                    }
+                  }}
+                >
+                  {isLastBeat
+                    ? "REMEMBER THIS"
+                    : "CONTINUE"}
+
+                  <span>→</span>
+                </button>
+              </div>
+            </div>
+          </main>
+        </div>
+      )}
+
+      {screen === "question" && (
+        <div className="ru-fullscreen-panel">
+          <div className="ru-memory-card">
+            <div className="ru-memory-top">
+              <span>THE WATCHER / MEMORY</span>
+
+              <span>04</span>
+            </div>
+
+            <div className="ru-memory-orb">
+              ◇
+            </div>
+
+            <h2>
+              {story.storyQuestion ||
+                `What did you learn about this discovery, ${playerName}?`}
+            </h2>
+
+            <p className="ru-memory-subtitle">
+              The answer is in what you just heard.
+            </p>
+
+            <GameNarrator
+              key="story-question"
+              text={[
+                story.storyQuestion ||
+                  `What did you learn about this discovery, ${playerName}?`,
+                ...questionOptions.map(
+                  (option, index) =>
+                    `Option ${String.fromCharCode(
+                      65 + index,
+                    )}. ${option}`,
+                ),
+              ].join(". ")}
+              autoPlay
+            />
+
+            <div className="ru-memory-options">
+              {questionOptions.map(
+                (option, index) => {
+                  const selected =
+                    answer === index;
+
+                  const isCorrect =
+                    index ===
+                    story.storyQuestionAnswer;
+
+                  let className =
+                    "ru-memory-option";
+
+                  if (answer !== null && isCorrect) {
+                    className += " correct";
+                  }
+
+                  if (
+                    selected &&
+                    !isCorrect
+                  ) {
+                    className += " incorrect";
+                  }
+
+                  return (
+                    <button
+                      key={`${option}-${index}`}
+                      type="button"
+                      disabled={answer !== null}
+                      className={className}
+                      onClick={() => {
+                        setAnswer(index);
+                        setScreen("reaction");
+                      }}
+                    >
+                      <span>
+                        {String.fromCharCode(
+                          65 + index,
+                        )}
+                      </span>
+
+                      <strong>{option}</strong>
+
+                      <i>→</i>
+                    </button>
+                  );
+                },
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === "reaction" && (
+        <div className="ru-fullscreen-panel">
+          <div
+            className={`ru-reaction-card ${
+              correct
+                ? "is-correct"
+                : "is-incorrect"
+            }`}
+          >
+            <div className="ru-reaction-character">
+              <img
+                src={character.src}
+                alt=""
+              />
+            </div>
+
+            <div className="ru-reaction-content">
+              <span className="ru-reaction-status">
+                {correct
+                  ? "CORRECT"
+                  : "NOT QUITE"}
+              </span>
+
+              <h2>
+                {correct
+                  ? "You noticed the detail."
+                  : "The detail was hiding in plain sight."}
+              </h2>
+
+              <p>
+                {story.storyQuestionExplanation ||
+                  "The answer is grounded in the discovery you just explored."}
+              </p>
+
+              <GameNarrator
+                key={`reaction-${correct}`}
+                text={
+                  correct
+                    ? `Correct, ${playerName}. ${
+                        story.storyQuestionExplanation ||
+                        "You noticed the important detail."
+                      }`
+                    : `Not quite, ${playerName}. ${
+                        story.storyQuestionExplanation ||
+                        "Look back at the detail the Watcher described."
+                      }`
+                }
+                autoPlay
+              />
+
+              <button
+                type="button"
+                className="ru-primary-next ru-reaction-next"
+                onClick={() => {
+                  onFinished(correct);
+                  setScreen("next");
+                }}
+              >
+                CONTINUE
+                <span>→</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === "next" && (
+        <div className="ru-fullscreen-panel">
+          <div className="ru-next-modal">
+            <span className="ru-next-eyebrow">
+              THE DISCOVERY CONTINUES
+            </span>
+
+            <h2>
+              Where do we go from here?
+            </h2>
+
+            <p>
+              You found the first layer.
+              The world still has another
+              detail waiting to be noticed.
+            </p>
+
+            <div className="ru-next-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  const question =
+                    story.curiosityQuestions?.[0];
+
+                  if (question) {
+                    setScreen("more");
+                    void askMore(question);
+                  } else {
+                    setScreen("more");
+                  }
+                }}
+              >
+                <span>01</span>
+                <strong>ASK THE WATCHER</strong>
+                <small>
+                  Explore this exact discovery
+                  further.
+                </small>
+                <i>→</i>
+              </button>
+
+              <button
+                type="button"
+                onClick={onMission}
+              >
+                <span>02</span>
+                <strong>SOLVE THE CLUE</strong>
+                <small>
+                  Follow the next thread hidden
+                  in the discovery.
+                </small>
+                <i>→</i>
+              </button>
+
+              <button
+                type="button"
+                onClick={onTarget}
+              >
+                <span>03</span>
+                <strong>LOOK AGAIN</strong>
+                <small>
+                  Return to the real world and
+                  inspect it again.
+                </small>
+                <i>→</i>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === "more" && (
+        <div className="ru-fullscreen-panel">
+          <div className="ru-more-modal">
+            <div className="ru-memory-top">
+              <span>THE WATCHER / DEEPER LOOK</span>
+
+              <button
+                type="button"
+                onClick={() => setScreen("next")}
+              >
+                ×
+              </button>
+            </div>
+
+            <h2>
+              Ask about what you found.
+            </h2>
+
+            <p className="ru-more-intro">
+              These questions are generated
+              specifically from this discovery.
+            </p>
+
+            <div className="ru-curiosity-list">
+              {(
+                story.curiosityQuestions ??
+                []
+              ).map((question, index) => (
+                <button
+                  key={`${question}-${index}`}
+                  type="button"
+                  onClick={() =>
+                    void askMore(question)
+                  }
+                >
+                  <span>
+                    0{index + 1}
+                  </span>
+                  <strong>{question}</strong>
+                  <i>→</i>
+                </button>
+              ))}
+            </div>
+
+            {moreQuestion && (
+              <div className="ru-more-answer">
+                <span>THE WATCHER</span>
+
+                <h3>{moreQuestion}</h3>
+
+                <p>
+                  {moreAnswer ||
+                    "Searching the discovery context…"}
+                </p>
+
+                {moreAnswer && (
+                  <GameNarrator
+                    key={moreAnswer}
+                    text={moreAnswer}
+                    autoPlay
+                  />
+                )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="ru-primary-next ru-back-next"
+              onClick={() => setScreen("next")}
+            >
+              BACK TO DISCOVERY
+              <span>→</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {onClose && (
+        <button
+          type="button"
+          className="ru-story-close"
+          onClick={onClose}
+        >
+          ESC
+        </button>
+      )}
+    </section>
+  );
+}

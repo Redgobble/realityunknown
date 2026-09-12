@@ -12,11 +12,6 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-
-    // Project safety backups — never lint historical copies.
-    ".production-backup-*/**",
-    ".cleanup-backup-*/**",
-    "backup-*/**",
   ]),
 ]);
 

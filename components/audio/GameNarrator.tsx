@@ -1,0 +1,209 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+type NarratorState =
+  | "idle"
+  | "loading"
+  | "playing"
+  | "error";
+
+type GameNarratorProps = {
+  text: string;
+  autoPlay?: boolean;
+  onStart?: () => void;
+  onEnded?: () => void;
+};
+
+let activeAudio: HTMLAudioElement | null = null;
+let activeUrl: string | null = null;
+let globalGeneration = 0;
+
+export function GameNarrator({
+  text,
+  autoPlay = false,
+  onStart,
+  onEnded,
+}: GameNarratorProps) {
+  const [state, setState] = useState<NarratorState>("idle");
+  const requestIdRef = useRef(0);
+
+  const stop = useCallback(() => {
+    globalGeneration++;
+
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio.currentTime = 0;
+      activeAudio.removeAttribute("src");
+      activeAudio.load();
+      activeAudio = null;
+    }
+
+    if (activeUrl) {
+      URL.revokeObjectURL(activeUrl);
+      activeUrl = null;
+    }
+
+    setState("idle");
+  }, []);
+
+  const play = useCallback(async () => {
+    const spokenText = text.trim();
+
+    if (!spokenText) {
+      return;
+    }
+
+    const requestId = ++requestIdRef.current;
+    const generation = ++globalGeneration;
+
+    // Absolutely stop any previous narrator.
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio.currentTime = 0;
+      activeAudio.removeAttribute("src");
+      activeAudio.load();
+      activeAudio = null;
+    }
+
+    if (activeUrl) {
+      URL.revokeObjectURL(activeUrl);
+      activeUrl = null;
+    }
+
+    setState("loading");
+
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text: spokenText,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Narrator API error:", errorText);
+        throw new Error("Narration request failed.");
+      }
+
+      const blob = await response.blob();
+
+      if (
+        requestId !== requestIdRef.current ||
+        generation !== globalGeneration
+      ) {
+        return;
+      }
+
+      const url = URL.createObjectURL(blob);
+      activeUrl = url;
+
+      const audio = new Audio(url);
+
+      audio.preload = "auto";
+      audio.volume = 0.94;
+
+      activeAudio = audio;
+
+      audio.onplay = () => {
+        setState("playing");
+        onStart?.();
+      };
+
+      audio.onended = () => {
+        if (activeAudio === audio) {
+          activeAudio = null;
+        }
+
+        if (activeUrl === url) {
+          URL.revokeObjectURL(url);
+          activeUrl = null;
+        }
+
+        setState("idle");
+        onEnded?.();
+      };
+
+      audio.onerror = () => {
+        if (activeAudio === audio) {
+          activeAudio = null;
+        }
+
+        if (activeUrl === url) {
+          URL.revokeObjectURL(url);
+          activeUrl = null;
+        }
+
+        setState("error");
+      };
+
+      await audio.play();
+    } catch (error) {
+      console.error("GAME NARRATOR ERROR:", error);
+
+      if (requestId === requestIdRef.current) {
+        setState("error");
+      }
+    }
+  }, [text, onStart, onEnded]);
+
+  useEffect(() => {
+    if (!autoPlay || !text.trim()) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void play();
+    }, 80);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [autoPlay, text, play]);
+
+  useEffect(() => {
+    return () => {
+      requestIdRef.current++;
+      stop();
+    };
+  }, [stop]);
+
+  return (
+    <div className="ru-game-narrator">
+      <button
+        type="button"
+        className="ru-narrator-button"
+        onClick={() => void play()}
+        disabled={state === "loading"}
+      >
+        <span className="ru-narrator-icon">
+          {state === "loading"
+            ? "…"
+            : state === "playing"
+              ? "■"
+              : "▶"}
+        </span>
+
+        <span>
+          {state === "loading"
+            ? "PREPARING VOICE"
+            : state === "playing"
+              ? "NARRATING"
+              : state === "error"
+                ? "TRY VOICE AGAIN"
+                : "HEAR THIS"}
+        </span>
+      </button>
+
+      {state === "error" && (
+        <span className="ru-narrator-error">
+          Tap “TRY VOICE AGAIN” if your browser blocked automatic playback.
+        </span>
+      )}
+    </div>
+  );
+}
