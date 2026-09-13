@@ -1,0 +1,752 @@
+import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Coordinate = {
+  lat: number;
+  lon: number;
+};
+
+type OSMElement = {
+  type: string;
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: {
+    lat: number;
+    lon: number;
+  };
+  tags?: Record<string, string>;
+};
+
+type WikipediaSummary = {
+  title: string;
+  extract: string;
+  url: string;
+  thumbnail?: string;
+};
+
+const START: Coordinate = {
+  lat: 28.6139,
+  lon: 77.2090,
+};
+
+const OSM_HEADERS = {
+  "User-Agent":
+    "RealityUnknown/1.0 (route explorer demo; local development)",
+  Accept: "application/json",
+};
+
+function validCoordinate(value: unknown): value is Coordinate {
+  if (!value || typeof value !== "object") return false;
+  const point = value as Record<string, unknown>;
+  return (
+    typeof point.lat === "number" &&
+    typeof point.lon === "number" &&
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lon) &&
+    Math.abs(point.lat) <= 90 &&
+    Math.abs(point.lon) <= 180
+  );
+}
+
+async function fetchJson<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      ...OSM_HEADERS,
+      ...(init?.headers ?? {}),
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`External service returned ${response.status}`);
+  }
+
+  return (await response.json()) as T;
+}
+
+function haversine(a: Coordinate, b: Coordinate) {
+  const earthRadius = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
+function pointToSegmentDistance(
+  point: Coordinate,
+  a: Coordinate,
+  b: Coordinate,
+) {
+  const latScale = 111320;
+  const lonScale = 111320 * Math.cos((point.lat * Math.PI) / 180);
+
+  const px = point.lon * lonScale;
+  const py = point.lat * latScale;
+  const ax = a.lon * lonScale;
+  const ay = a.lat * latScale;
+  const bx = b.lon * lonScale;
+  const by = b.lat * latScale;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(px - ax, py - ay);
+  }
+
+  const t = Math.max(
+    0,
+    Math.min(
+      1,
+      ((px - ax) * dx + (py - ay) * dy) /
+        (dx * dx + dy * dy),
+    ),
+  );
+
+  const closestX = ax + t * dx;
+  const closestY = ay + t * dy;
+
+  return Math.hypot(px - closestX, py - closestY);
+}
+
+function pointToRouteDistance(
+  point: Coordinate,
+  route: Coordinate[],
+) {
+  let best = Number.POSITIVE_INFINITY;
+
+  for (let index = 1; index < route.length; index += 1) {
+    best = Math.min(
+      best,
+      pointToSegmentDistance(
+        point,
+        route[index - 1],
+        route[index],
+      ),
+    );
+  }
+
+  return best;
+}
+
+function getElementPoint(element: OSMElement): Coordinate | null {
+  if (
+    typeof element.lat === "number" &&
+    typeof element.lon === "number"
+  ) {
+    return {
+      lat: element.lat,
+      lon: element.lon,
+    };
+  }
+
+  if (element.center) {
+    return element.center;
+  }
+
+  return null;
+}
+
+function normalizeWikipediaTag(value?: string) {
+  if (!value) return null;
+
+  const separator = value.indexOf(":");
+
+  if (separator > 0) {
+    const language = value.slice(0, separator);
+    if (language.length <= 5) {
+      return value.slice(separator + 1);
+    }
+  }
+
+  return value;
+}
+
+async function getWikidataWikipediaTitle(
+  wikidata?: string,
+) {
+  if (!wikidata || !/^Q\d+$/i.test(wikidata)) {
+    return null;
+  }
+
+  try {
+    const data = await fetchJson<{
+      entities?: Record<
+        string,
+        {
+          sitelinks?: {
+            enwiki?: {
+              title?: string;
+            };
+          };
+        }
+      >;
+    }>(
+      `https://www.wikidata.org/wiki/Special:EntityData/${encodeURIComponent(
+        wikidata,
+      )}.json?flavor=simple`,
+      {
+        headers: {
+          "User-Agent":
+            "RealityUnknown/1.0 (route explorer demo)",
+        },
+      },
+    );
+
+    return (
+      data.entities?.[wikidata]?.sitelinks?.enwiki
+        ?.title ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function getWikipediaSummary(
+  title: string,
+): Promise<WikipediaSummary | null> {
+  try {
+    const data = await fetchJson<{
+      title?: string;
+      extract?: string;
+      content_urls?: {
+        desktop?: {
+          page?: string;
+        };
+      };
+      thumbnail?: {
+        source?: string;
+      };
+    }>(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
+        title.replaceAll(" ", "_"),
+      )}`,
+      {
+        headers: {
+          "User-Agent":
+            "RealityUnknown/1.0 (route explorer demo)",
+        },
+      },
+    );
+
+    if (!data.extract || !data.title) {
+      return null;
+    }
+
+    return {
+      title: data.title,
+      extract: data.extract,
+      url:
+        data.content_urls?.desktop?.page ??
+        `https://en.wikipedia.org/wiki/${encodeURIComponent(
+          data.title.replaceAll(" ", "_"),
+        )}`,
+      thumbnail: data.thumbnail?.source,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function searchWikipediaTitle(query: string) {
+  try {
+    const data = await fetchJson<{
+      query?: {
+        search?: Array<{
+          title?: string;
+        }>;
+      };
+    }>(
+      `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+        query,
+      )}&format=json&utf8=1&srlimit=5`,
+      {
+        headers: {
+          "User-Agent":
+            "RealityUnknown/1.0 (route explorer demo)",
+        },
+      },
+    );
+
+    return data.query?.search?.[0]?.title ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getLocationLabel(address: Record<string, unknown> | undefined) {
+  if (!address) return "Live location";
+
+  const locality =
+    String(
+      address.suburb ??
+        address.neighbourhood ??
+        address.quarter ??
+        "",
+    ).trim();
+
+  const city = String(
+    address.city ??
+      address.town ??
+      address.village ??
+      address.municipality ??
+      address.county ??
+      "",
+  ).trim();
+
+  const state = String(
+    address.state ?? "",
+  ).trim();
+
+  const primary = [locality, city].filter(Boolean).join(", ");
+
+  if (primary) return primary;
+  if (city) return city;
+  if (state) return state;
+
+  return "Live location";
+}
+
+async function reverseGeocode(point: Coordinate) {
+  try {
+    const data = await fetchJson<{
+      display_name?: string;
+      address?: Record<string, unknown>;
+    }>(
+      `https://nominatim.openstreetmap.org/reverse?lat=${encodeURIComponent(
+        point.lat,
+      )}&lon=${encodeURIComponent(
+        point.lon,
+      )}&format=jsonv2&addressdetails=1&zoom=18&extratags=1`,
+      {
+        headers: {
+          "User-Agent":
+            "RealityUnknown/1.0 (route explorer demo; local development)",
+          Referer: "http://localhost:3000/route-explorer",
+        },
+      },
+    );
+
+    return {
+      name: getLocationLabel(data.address),
+      displayName:
+        data.display_name ?? getLocationLabel(data.address),
+      city:
+        String(
+          data.address?.city ??
+            data.address?.town ??
+            data.address?.village ??
+            data.address?.municipality ??
+            data.address?.county ??
+            "",
+        ).trim() || null,
+    };
+  } catch {
+    return {
+      name: "Live location",
+      displayName: "Your current location",
+      city: null,
+    };
+  }
+}
+
+async function findHistoricalPlaces(
+  route: Coordinate[],
+) {
+  const lats = route.map((point) => point.lat);
+  const lons = route.map((point) => point.lon);
+
+  const south = Math.min(...lats) - 0.018;
+  const north = Math.max(...lats) + 0.018;
+  const west = Math.min(...lons) - 0.018;
+  const east = Math.max(...lons) + 0.018;
+
+  const bbox = `${south},${west},${north},${east}`;
+
+  const query = `
+[out:json][timeout:25];
+(
+  nwr["historic"](${bbox});
+  nwr["heritage"](${bbox});
+  nwr["tourism"~"^(museum|attraction)$"](${bbox});
+  nwr["man_made"~"^(monument|memorial)$"](${bbox});
+);
+out center tags;
+`;
+
+  let elements: OSMElement[] = [];
+
+  try {
+    const data = await fetchJson<{
+      elements?: OSMElement[];
+    }>("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded; charset=UTF-8",
+        "User-Agent":
+          "RealityUnknown/1.0 (route explorer demo)",
+      },
+      body: `data=${encodeURIComponent(query)}`,
+    });
+
+    elements = data.elements ?? [];
+  } catch {
+    return [];
+  }
+
+  const candidates = elements
+    .map((element) => {
+      const point = getElementPoint(element);
+      const tags = element.tags ?? {};
+      const name =
+        tags.name ??
+        tags["name:en"] ??
+        tags["official_name"];
+
+      if (!point || !name) return null;
+
+      const historic = tags.historic;
+      const heritage = tags.heritage;
+      const tourism = tags.tourism;
+      const manMade = tags.man_made;
+      const hasWiki =
+        Boolean(tags.wikipedia) ||
+        Boolean(tags.wikidata);
+
+      const eligible =
+        Boolean(historic) ||
+        Boolean(heritage) ||
+        tourism === "museum" ||
+        tourism === "attraction" ||
+        manMade === "monument" ||
+        manMade === "memorial";
+
+      if (!eligible) return null;
+
+      const routeDistance = pointToRouteDistance(
+        point,
+        route,
+      );
+
+      if (routeDistance > 1800) return null;
+
+      let score = 0;
+
+      if (historic) score += 4;
+      if (heritage) score += 4;
+      if (tourism === "museum") score += 3;
+      if (tourism === "attraction") score += 2;
+      if (manMade === "monument") score += 3;
+      if (manMade === "memorial") score += 3;
+      if (hasWiki) score += 4;
+      if (tags.start_date) score += 1;
+
+      return {
+        element,
+        point,
+        name,
+        tags,
+        routeDistance,
+        score,
+      };
+    })
+    .filter(
+      (
+        item,
+      ): item is {
+        element: OSMElement;
+        point: Coordinate;
+        name: string;
+        tags: Record<string, string>;
+        routeDistance: number;
+        score: number;
+      } => Boolean(item),
+    );
+
+  const deduped = Array.from(
+    new Map(
+      candidates.map((candidate) => [
+        candidate.name.toLowerCase(),
+        candidate,
+      ]),
+    ).values(),
+  );
+
+  deduped.sort(
+    (a, b) =>
+      b.score - a.score ||
+      a.routeDistance - b.routeDistance,
+  );
+
+  const topCandidates = deduped.slice(0, 8);
+
+  const hydrated = await Promise.all(
+    topCandidates.map(async (candidate) => {
+      let wikipediaTitle = normalizeWikipediaTag(
+        candidate.tags.wikipedia,
+      );
+
+      if (!wikipediaTitle) {
+        wikipediaTitle =
+          await getWikidataWikipediaTitle(
+            candidate.tags.wikidata,
+          );
+      }
+
+      const wikipedia = wikipediaTitle
+        ? await getWikipediaSummary(wikipediaTitle)
+        : null;
+
+      /*
+       * IMPORTANT:
+       * Do not fuzzy-search Wikipedia by candidate name here.
+       *
+       * A fuzzy search can return a different historical place
+       * with a visually unrelated thumbnail. We only trust:
+       *
+       * 1. an explicit OSM wikipedia=* tag
+       * 2. an explicit OSM wikidata=* tag resolved to Wikipedia
+       *
+       * If neither exists, the record may still be shown from
+       * verified OSM description data, but it receives NO image.
+       */
+
+      const description =
+        candidate.tags.description?.trim() ||
+        candidate.tags["description:en"]?.trim() ||
+        "";
+
+      if (!wikipedia && description.length < 60) {
+        return null;
+      }
+
+      const history =
+        wikipedia?.extract ??
+        description;
+
+      return {
+        id: `${candidate.element.type}-${candidate.element.id}`,
+        name: candidate.name,
+        category:
+          candidate.tags.historic ??
+          candidate.tags.tourism ??
+          candidate.tags.man_made ??
+          "historical site",
+        lat: candidate.point.lat,
+        lon: candidate.point.lon,
+        distanceFromRouteM: Math.round(
+          candidate.routeDistance,
+        ),
+        history,
+        source:
+          wikipedia?.title
+            ? "Wikipedia"
+            : "OpenStreetMap",
+        sourceUrl:
+          wikipedia?.url ??
+          `https://www.openstreetmap.org/${candidate.element.type}/${candidate.element.id}`,
+        imageUrl: wikipedia?.thumbnail ?? null,
+        period:
+          candidate.tags.start_date ??
+          candidate.tags["start_date:en"] ??
+          null,
+      };
+    }),
+  );
+
+  return hydrated
+    .filter(
+      (
+        item,
+      ): item is NonNullable<typeof item> =>
+        Boolean(item),
+    )
+    .sort(
+      (a, b) =>
+        a.distanceFromRouteM -
+          b.distanceFromRouteM ||
+        a.name.localeCompare(
+          b.name,
+          undefined,
+          {
+            sensitivity: "base",
+          },
+        ),
+    )
+    .slice(0, 6);
+}
+
+export async function POST(
+  request: NextRequest,
+) {
+  try {
+    const body = await request.json();
+
+    const end = body?.end as Coordinate | undefined;
+
+    if (!validCoordinate(end)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "A valid live destination is required.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const routeUrl =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${START.lon},${START.lat};${end.lon},${end.lat}` +
+      `?overview=full&geometries=geojson&steps=false`;
+
+    const osrm = await fetchJson<{
+      code?: string;
+      routes?: Array<{
+        distance: number;
+        duration: number;
+        geometry?: {
+          type: "LineString";
+          coordinates: number[][];
+        };
+      }>;
+    }>(routeUrl);
+
+    if (
+      osrm.code !== "Ok" ||
+      !osrm.routes?.[0]?.geometry?.coordinates?.length
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No drivable route could be reconstructed between Delhi and your location.",
+        },
+        { status: 422 },
+      );
+    }
+
+    const route = osrm.routes[0];
+
+    const geometry = route.geometry;
+
+    if (!geometry) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "The route geometry was not returned by the routing service.",
+        },
+        { status: 422 },
+      );
+    }
+
+    const routeCoordinates =
+      geometry.coordinates
+        .map((coordinate) => ({
+          lon: coordinate[0],
+          lat: coordinate[1],
+        }))
+        .filter(
+          (point) =>
+            Number.isFinite(point.lat) &&
+            Number.isFinite(point.lon),
+        );
+
+    const destination = await reverseGeocode(
+      end,
+    );
+
+    const historicalPlaces =
+      await findHistoricalPlaces(
+        routeCoordinates,
+      );
+
+    const contextCity =
+      destination.city ?? "Greater Noida";
+
+    let routeContext: WikipediaSummary | null =
+      null;
+
+    const contextTitle =
+      await searchWikipediaTitle(contextCity);
+
+    if (contextTitle) {
+      routeContext =
+        await getWikipediaSummary(
+          contextTitle,
+        );
+    }
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        origin: {
+          ...START,
+          name: "Delhi",
+          area: "Greater Noida",
+        },
+        destination: {
+          lat: end.lat,
+          lon: end.lon,
+          name: destination.name,
+          displayName: destination.displayName,
+          city: destination.city,
+        },
+        route: {
+          distanceKm:
+            Math.round(
+              (route.distance / 1000) * 10,
+            ) / 10,
+          durationMin:
+            Math.max(
+              1,
+              Math.round(route.duration / 60),
+            ),
+          coordinates: routeCoordinates,
+        },
+        discoveries: historicalPlaces,
+        routeContext: routeContext
+          ? {
+              title: routeContext.title,
+              history: routeContext.extract,
+              source: "Wikipedia",
+              sourceUrl: routeContext.url,
+              imageUrl:
+                routeContext.thumbnail ?? null,
+            }
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Route Explorer failed:",
+      error,
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Route reconstruction failed.",
+      },
+      { status: 500 },
+    );
+  }
+}

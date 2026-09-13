@@ -1,0 +1,237 @@
+import { NextRequest, NextResponse } from "next/server";
+
+type Coordinate = {
+  lat: number;
+  lon: number;
+};
+
+type RoutePlace = {
+  id: string;
+  name: string;
+  type: string;
+  lat: number;
+  lon: number;
+  distanceKm: number;
+  description: string;
+  wikipedia?: string;
+};
+
+function distanceKm(a: Coordinate, b: Coordinate) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+
+  const x =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.sin(dLon / 2) *
+      Math.sin(dLon / 2) *
+      Math.cos(lat1) *
+      Math.cos(lat2);
+
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+function sampleRoute(coords: Coordinate[], count = 18) {
+  if (coords.length <= count) return coords;
+
+  const result: Coordinate[] = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const index = Math.floor(
+      (i / (count - 1)) * (coords.length - 1),
+    );
+
+    result.push(coords[index]);
+  }
+
+  return result;
+}
+
+async function fetchWikipediaPlaces(
+  points: Coordinate[],
+): Promise<RoutePlace[]> {
+  const places = new Map<string, RoutePlace>();
+
+  for (const point of points) {
+    const url =
+      "https://en.wikipedia.org/w/api.php?" +
+      new URLSearchParams({
+        action: "query",
+        list: "geosearch",
+        gscoord: `${point.lat}|${point.lon}`,
+        gsradius: "10000",
+        gslimit: "8",
+        format: "json",
+        origin: "*",
+      }).toString();
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "RealityUnknown/1.0 route-explorer",
+        },
+        next: {
+          revalidate: 3600,
+        },
+      });
+
+      if (!response.ok) continue;
+
+      const data = await response.json();
+
+      for (const item of data?.query?.geosearch ?? []) {
+        const placeId = String(item.pageid);
+
+        if (places.has(placeId)) continue;
+
+        const itemDistance = distanceKm(point, {
+          lat: Number(item.lat),
+          lon: Number(item.lon),
+        });
+
+        places.set(placeId, {
+          id: placeId,
+          name: String(item.title)
+            .replace(/^Category:/, "")
+            .trim(),
+          type: "HISTORICAL DISCOVERY",
+          lat: Number(item.lat),
+          lon: Number(item.lon),
+          distanceKm: itemDistance,
+          description:
+            "A place of interest discovered along your route.",
+          wikipedia: `https://en.wikipedia.org/?curid=${placeId}`,
+        });
+      }
+    } catch {
+      // Keep the route usable even if one knowledge request fails.
+    }
+  }
+
+  return Array.from(places.values())
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, 12);
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+
+    const start = body?.start as Coordinate | undefined;
+    const end = body?.end as Coordinate | undefined;
+
+    if (
+      !start ||
+      !end ||
+      !Number.isFinite(start.lat) ||
+      !Number.isFinite(start.lon) ||
+      !Number.isFinite(end.lat) ||
+      !Number.isFinite(end.lon)
+    ) {
+      return NextResponse.json(
+        {
+          error: "Valid start and end coordinates are required.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const straightLineDistance = distanceKm(start, end);
+
+    if (straightLineDistance < 0.05) {
+      return NextResponse.json(
+        {
+          error:
+            "Move a little farther before ending the route.",
+        },
+        { status: 400 },
+      );
+    }
+
+    /*
+     * OSRM provides the actual drivable route geometry.
+     * For production scale, replace the public endpoint
+     * with your own routing provider/server.
+     */
+    const osrmUrl =
+      "https://router.project-osrm.org/route/v1/driving/" +
+      `${start.lon},${start.lat};${end.lon},${end.lat}` +
+      "?overview=full&geometries=geojson";
+
+    const routeResponse = await fetch(osrmUrl, {
+      headers: {
+        "User-Agent": "RealityUnknown/1.0",
+      },
+      next: {
+        revalidate: 60,
+      },
+    });
+
+    if (!routeResponse.ok) {
+      return NextResponse.json(
+        {
+          error:
+            "The route service is temporarily unavailable.",
+        },
+        { status: 502 },
+      );
+    }
+
+    const routeData = await routeResponse.json();
+
+    const route = routeData?.routes?.[0];
+
+    if (!route) {
+      return NextResponse.json(
+        {
+          error: "No route could be found between these locations.",
+        },
+        { status: 404 },
+      );
+    }
+
+    const routeCoordinates: Coordinate[] =
+      route.geometry.coordinates.map(
+        (coordinate: [number, number]) => ({
+          lat: coordinate[1],
+          lon: coordinate[0],
+        }),
+      );
+
+    const sampled = sampleRoute(routeCoordinates);
+
+    const places = await fetchWikipediaPlaces(sampled);
+
+    return NextResponse.json({
+      success: true,
+      route: {
+        distanceKm: Number(route.distance / 1000),
+        durationMinutes: Math.round(route.duration / 60),
+        coordinates: routeCoordinates,
+      },
+      places,
+      meta: {
+        start,
+        end,
+        straightLineDistanceKm: Number(
+          straightLineDistance.toFixed(2),
+        ),
+        generatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Route explorer error:", error);
+
+    return NextResponse.json(
+      {
+        error:
+          "Reality Unknown could not reconstruct this journey.",
+      },
+      { status: 500 },
+    );
+  }
+}

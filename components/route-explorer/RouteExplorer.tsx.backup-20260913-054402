@@ -1,0 +1,811 @@
+"use client";
+
+import Link from "next/link";
+import { motion } from "framer-motion";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+type Coordinate = {
+  lat: number;
+  lon: number;
+};
+
+type Place = {
+  id: string;
+  name: string;
+  type: string;
+  lat: number;
+  lon: number;
+  distanceKm: number;
+  description: string;
+  wikipedia?: string;
+};
+
+type RouteResult = {
+  success: boolean;
+  route: {
+    distanceKm: number;
+    durationMinutes: number;
+    coordinates: Coordinate[];
+  };
+  places: Place[];
+};
+
+type Phase =
+  | "idle"
+  | "locating"
+  | "ready"
+  | "analysing"
+  | "complete"
+  | "error";
+
+const PARI_CHOWK: Coordinate = {
+  lat: 28.4653,
+  lon: 77.5117,
+};
+
+function formatDistance(value: number) {
+  if (value < 1) {
+    return `${Math.round(value * 1000)} m`;
+  }
+
+  return `${value.toFixed(1)} km`;
+}
+
+function getLivePosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(
+        new Error(
+          "Live location is not supported by this browser.",
+        ),
+      );
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      resolve,
+      reject,
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
+      },
+    );
+  });
+}
+
+function coordinateLabel(
+  coordinate: Coordinate,
+) {
+  return `${coordinate.lat.toFixed(4)}° N  ${coordinate.lon.toFixed(4)}° E`;
+}
+
+export default function RouteExplorer() {
+  const [phase, setPhase] =
+    useState<Phase>("idle");
+
+  const [currentLocation, setCurrentLocation] =
+    useState<Coordinate | null>(null);
+
+  const [result, setResult] =
+    useState<RouteResult | null>(null);
+
+  const [error, setError] =
+    useState("");
+
+  const [activePlace, setActivePlace] =
+    useState<Place | null>(null);
+
+  const [visiblePlaces, setVisiblePlaces] =
+    useState(0);
+
+  const locateTraveller = useCallback(
+    async () => {
+      setError("");
+      setPhase("locating");
+
+      try {
+        const position =
+          await getLivePosition();
+
+        const location = {
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+        };
+
+        setCurrentLocation(location);
+        setPhase("ready");
+      } catch (locationError) {
+        console.error(
+          "Live location error:",
+          locationError,
+        );
+
+        setPhase("error");
+
+        setError(
+          "Reality Unknown needs your live location to discover the journey from Pari Chowk to where you are.",
+        );
+      }
+    },
+    [],
+  );
+
+  const revealRoute = useCallback(
+    async () => {
+      if (!currentLocation) {
+        await locateTraveller();
+        return;
+      }
+
+      setError("");
+      setPhase("analysing");
+      setActivePlace(null);
+
+      try {
+        const response = await fetch(
+          "/api/route-explorer",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              start: PARI_CHOWK,
+              end: currentLocation,
+            }),
+          },
+        );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data?.error ||
+              "Unable to reconstruct the journey.",
+          );
+        }
+
+        setResult(data);
+        setVisiblePlaces(0);
+        setPhase("complete");
+      } catch (routeError) {
+        console.error(
+          "Route reconstruction error:",
+          routeError,
+        );
+
+        setPhase("error");
+
+        setError(
+          routeError instanceof Error
+            ? routeError.message
+            : "Reality Unknown could not reconstruct this journey.",
+        );
+      }
+    },
+    [currentLocation, locateTraveller],
+  );
+
+  useEffect(() => {
+    if (
+      phase !== "complete" ||
+      !result
+    ) {
+      return;
+    }
+
+    setVisiblePlaces(0);
+
+    const timer =
+      window.setInterval(() => {
+        setVisiblePlaces(
+          (current) => {
+            if (
+              current >=
+              result.places.length
+            ) {
+              window.clearInterval(
+                timer,
+              );
+
+              return current;
+            }
+
+            return current + 1;
+          },
+        );
+      }, 320);
+
+    return () =>
+      window.clearInterval(timer);
+  }, [phase, result]);
+
+  const routeProgress =
+    useMemo(() => {
+      if (
+        !result ||
+        result.places.length === 0
+      ) {
+        return 100;
+      }
+
+      return Math.min(
+        100,
+        (visiblePlaces /
+          result.places.length) *
+          100,
+      );
+    }, [result, visiblePlaces]);
+
+  return (
+    <main className="ru-route-page">
+      <div className="ru-route-noise" />
+      <div className="ru-route-vignette" />
+
+      <header className="ru-route-header">
+        <Link
+          href="/"
+          className="ru-route-logo"
+          aria-label="Reality Unknown home"
+        >
+          <img
+            src="/assets/applogo/reality_unknown_logo.png"
+            alt="Reality Unknown"
+          />
+        </Link>
+
+        <div className="ru-route-header-status">
+          <span className="ru-route-status-dot" />
+
+          REALITY LINK
+
+          <strong>
+            {phase === "complete"
+              ? "MAPPED"
+              : phase ===
+                  "locating"
+                ? "LOCATING"
+                : "READY"}
+          </strong>
+        </div>
+
+        <Link
+          href="/enter-reality"
+          className="ru-route-exit"
+        >
+          EXIT <span>↗</span>
+        </Link>
+      </header>
+
+      <section className="ru-route-hero">
+        <motion.div
+          className="ru-route-eyebrow"
+          initial={{
+            opacity: 0,
+            y: 12,
+          }}
+          animate={{
+            opacity: 1,
+            y: 0,
+          }}
+        >
+          TRAVELLER MODE / ROUTE INTELLIGENCE
+        </motion.div>
+
+        <motion.h1
+          initial={{
+            opacity: 0,
+            y: 25,
+          }}
+          animate={{
+            opacity: 1,
+            y: 0,
+          }}
+          transition={{
+            delay: 0.1,
+          }}
+        >
+          Explore
+          <em>my route.</em>
+        </motion.h1>
+
+        <motion.p
+          initial={{
+            opacity: 0,
+          }}
+          animate={{
+            opacity: 1,
+          }}
+          transition={{
+            delay: 0.2,
+          }}
+        >
+          Start at Pari Chowk.
+          <br />
+          Reality Unknown will discover what lies
+          between there and where you are now.
+        </motion.p>
+
+        <div className="ru-route-journey-card">
+          <div className="ru-route-location">
+            <span className="ru-route-location-marker">
+              A
+            </span>
+
+            <div>
+              <small>ROUTE ORIGIN</small>
+              <strong>PARI CHOWK</strong>
+              <p>GREATER NOIDA</p>
+            </div>
+          </div>
+
+          <div className="ru-route-journey-connector">
+            <span />
+            <i />
+            <i />
+            <i />
+          </div>
+
+          <div className="ru-route-location">
+            <span className="ru-route-location-marker is-live">
+              B
+            </span>
+
+            <div>
+              <small>YOUR LOCATION</small>
+
+              <strong>
+                {currentLocation
+                  ? "LIVE LOCATION"
+                  : "WAITING FOR GPS"}
+              </strong>
+
+              <p>
+                {currentLocation
+                  ? coordinateLabel(
+                      currentLocation,
+                    )
+                  : "LOCATION NOT YET LOCKED"}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="ru-route-orbit">
+          <div className="ru-route-orbit-ring ru-route-orbit-ring-a" />
+          <div className="ru-route-orbit-ring ru-route-orbit-ring-b" />
+
+          <div className="ru-route-orbit-core">
+            <span />
+            <small>ROUTE</small>
+            <b>∞</b>
+          </div>
+        </div>
+
+        {phase === "idle" && (
+          <motion.button
+            type="button"
+            className="ru-route-primary"
+            onClick={locateTraveller}
+            whileHover={{
+              scale: 1.025,
+            }}
+            whileTap={{
+              scale: 0.98,
+            }}
+          >
+            <span className="ru-route-button-pulse" />
+            <span>
+              FIND MY LOCATION
+            </span>
+            <b>→</b>
+          </motion.button>
+        )}
+
+        {phase === "locating" && (
+          <RouteProcessing
+            label="LOCKING YOUR LIVE LOCATION"
+          />
+        )}
+
+        {phase === "ready" &&
+          currentLocation && (
+            <motion.div
+              className="ru-route-ready"
+              initial={{
+                opacity: 0,
+                y: 15,
+              }}
+              animate={{
+                opacity: 1,
+                y: 0,
+              }}
+            >
+              <div className="ru-route-live-card">
+                <span className="ru-route-live-icon">
+                  ●
+                </span>
+
+                <div>
+                  <small>
+                    LIVE LOCATION LOCKED
+                  </small>
+
+                  <strong>
+                    Destination acquired.
+                  </strong>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="ru-route-finish"
+                onClick={revealRoute}
+              >
+                <span>
+                  REVEAL MY JOURNEY
+                </span>
+
+                <b>→</b>
+              </button>
+
+              <p className="ru-route-travel-hint">
+                From Pari Chowk to your current
+                location.
+              </p>
+            </motion.div>
+          )}
+
+        {phase === "analysing" && (
+          <RouteProcessing
+            label="RECONSTRUCTING YOUR JOURNEY"
+          />
+        )}
+
+        {phase === "error" && (
+          <motion.div
+            className="ru-route-error"
+            initial={{
+              opacity: 0,
+            }}
+            animate={{
+              opacity: 1,
+            }}
+          >
+            <span>!</span>
+
+            <p>{error}</p>
+
+            <button
+              type="button"
+              onClick={locateTraveller}
+            >
+              TRY AGAIN
+            </button>
+          </motion.div>
+        )}
+      </section>
+
+      {phase === "complete" &&
+        result && (
+          <motion.section
+            className="ru-route-results"
+            initial={{
+              opacity: 0,
+              y: 40,
+            }}
+            animate={{
+              opacity: 1,
+              y: 0,
+            }}
+            transition={{
+              duration: 0.8,
+            }}
+          >
+            <div className="ru-route-results-head">
+              <div>
+                <span>
+                  JOURNEY DECODED
+                </span>
+
+                <h2>
+                  Your route
+                  <em>has a story.</em>
+                </h2>
+              </div>
+
+              <div className="ru-route-stat">
+                <small>
+                  DISTANCE
+                </small>
+
+                <strong>
+                  {formatDistance(
+                    result.route
+                      .distanceKm,
+                  )}
+                </strong>
+              </div>
+
+              <div className="ru-route-stat">
+                <small>
+                  DISCOVERIES
+                </small>
+
+                <strong>
+                  {result.places.length
+                    .toString()
+                    .padStart(2, "0")}
+                </strong>
+              </div>
+            </div>
+
+            <div className="ru-route-map-panel">
+              <div className="ru-route-map-grid" />
+
+              <div className="ru-route-map-route">
+                <span className="ru-route-map-start">
+                  A
+                </span>
+
+                <div className="ru-route-map-track">
+                  <i
+                    style={{
+                      width: `${routeProgress}%`,
+                    }}
+                  />
+
+                  {result.places.map(
+                    (place, index) => (
+                      <button
+                        key={place.id}
+                        type="button"
+                        className="ru-route-map-node"
+                        style={{
+                          left: `${
+                            8 +
+                            ((index + 1) /
+                              (result
+                                .places
+                                .length +
+                                1)) *
+                              84
+                          }%`,
+                        }}
+                        onClick={() =>
+                          setActivePlace(
+                            place,
+                          )
+                        }
+                        aria-label={
+                          place.name
+                        }
+                      >
+                        <span />
+                      </button>
+                    ),
+                  )}
+                </div>
+
+                <span className="ru-route-map-end">
+                  B
+                </span>
+              </div>
+
+              <div className="ru-route-map-copy">
+                <span>
+                  PARI CHOWK → YOU
+                </span>
+
+                <strong>
+                  {formatDistance(
+                    result.route
+                      .distanceKm,
+                  )}
+                </strong>
+
+                <small>
+                  {result.route
+                    .durationMinutes}{" "}
+                  min estimated travel
+                </small>
+              </div>
+
+              <div className="ru-route-map-scan">
+                <span />
+                REALITY MAPPED
+              </div>
+            </div>
+
+            <div className="ru-route-discoveries">
+              <div className="ru-route-discoveries-title">
+                <span>
+                  01 / WHAT YOU PASSED
+                </span>
+
+                <p>
+                  Reality Unknown found places
+                  worth knowing about between
+                  Pari Chowk and you.
+                </p>
+              </div>
+
+              <div className="ru-route-place-list">
+                {result.places.map(
+                  (place, index) =>
+                    index <
+                      visiblePlaces && (
+                      <motion.button
+                        key={place.id}
+                        type="button"
+                        className={`ru-route-place ${
+                          activePlace?.id ===
+                          place.id
+                            ? "is-active"
+                            : ""
+                        }`}
+                        onClick={() =>
+                          setActivePlace(
+                            place,
+                          )
+                        }
+                        initial={{
+                          opacity: 0,
+                          x: -25,
+                        }}
+                        animate={{
+                          opacity: 1,
+                          x: 0,
+                        }}
+                      >
+                        <span className="ru-route-place-number">
+                          {(index + 1)
+                            .toString()
+                            .padStart(
+                              2,
+                              "0",
+                            )}
+                        </span>
+
+                        <span className="ru-route-place-dot" />
+
+                        <span className="ru-route-place-copy">
+                          <small>
+                            {place.type}
+                          </small>
+
+                          <strong>
+                            {place.name}
+                          </strong>
+
+                          <p>
+                            {formatDistance(
+                              place.distanceKm,
+                            )}{" "}
+                            from the route
+                          </p>
+                        </span>
+
+                        <b>↗</b>
+                      </motion.button>
+                    ),
+                )}
+              </div>
+            </div>
+
+            {activePlace && (
+              <motion.div
+                className="ru-route-place-detail"
+                initial={{
+                  opacity: 0,
+                  y: 20,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                }}
+              >
+                <div className="ru-route-detail-mark">
+                  ✦
+                </div>
+
+                <div>
+                  <span>
+                    DISCOVERY ALONG YOUR
+                    JOURNEY
+                  </span>
+
+                  <h3>
+                    {activePlace.name}
+                  </h3>
+
+                  <p>
+                    {activePlace.description}
+                  </p>
+
+                  {activePlace.wikipedia && (
+                    <a
+                      href={
+                        activePlace.wikipedia
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      OPEN HISTORICAL RECORD ↗
+                    </a>
+                  )}
+                </div>
+              </motion.div>
+            )}
+
+            <div className="ru-route-final-message">
+              <span>
+                REALITY UNKNOWN
+              </span>
+
+              <h3>
+                You didn't just travel
+                <em>through it.</em>
+              </h3>
+
+              <p>
+                You travelled through history.
+              </p>
+            </div>
+          </motion.section>
+        )}
+
+      <footer className="ru-route-footer">
+        <span>
+          REALITY UNKNOWN
+        </span>
+
+        <span>
+          THE WORLD IS YOUR LEVEL
+        </span>
+
+        <span>
+          ROUTE INTELLIGENCE
+        </span>
+      </footer>
+    </main>
+  );
+}
+
+function RouteProcessing({
+  label,
+}: {
+  label: string;
+}) {
+  return (
+    <motion.div
+      className="ru-route-processing"
+      initial={{
+        opacity: 0,
+      }}
+      animate={{
+        opacity: 1,
+      }}
+    >
+      <div className="ru-route-loader">
+        <i />
+        <i />
+        <i />
+      </div>
+
+      <span>{label}</span>
+
+      <small>
+        CONNECTING REALITY / READING YOUR JOURNEY
+      </small>
+    </motion.div>
+  );
+}

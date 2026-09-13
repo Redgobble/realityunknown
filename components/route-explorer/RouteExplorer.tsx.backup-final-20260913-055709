@@ -1,0 +1,1408 @@
+"use client";
+
+import Link from "next/link";
+import {
+  AnimatePresence,
+  motion,
+} from "framer-motion";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+type Phase =
+  | "idle"
+  | "locating"
+  | "ready"
+  | "analysing"
+  | "complete"
+  | "error";
+
+type Coordinate = {
+  lat: number;
+  lon: number;
+};
+
+type Discovery = {
+  id: string;
+  name: string;
+  category: string;
+  lat: number;
+  lon: number;
+  distanceFromRouteM: number;
+  history: string;
+  source: string;
+  sourceUrl: string;
+  imageUrl: string | null;
+  period: string | null;
+};
+
+type RouteResult = {
+  origin: Coordinate & {
+    name: string;
+    area: string;
+  };
+  destination: Coordinate & {
+    name: string;
+    displayName: string;
+    city: string | null;
+  };
+  route: {
+    distanceKm: number;
+    durationMin: number;
+    coordinates: Coordinate[];
+  };
+  discoveries: Discovery[];
+  routeContext: {
+    title: string;
+    history: string;
+    source: string;
+    sourceUrl: string;
+    imageUrl: string | null;
+  } | null;
+};
+
+const DELHI_ORIGIN: Coordinate = {
+  lat: 28.6139,
+  lon: 77.2090,
+};
+
+function formatDistance(meters: number) {
+  if (meters < 1000) {
+    return `${meters} m from route`;
+  }
+
+  return `${(meters / 1000).toFixed(1)} km from route`;
+}
+
+function clampText(
+  text: string,
+  length = 240,
+) {
+  if (text.length <= length) return text;
+  return `${text.slice(0, length).trim()}…`;
+}
+
+export default function RouteExplorer() {
+  const [phase, setPhase] =
+    useState<Phase>("idle");
+
+  const [currentLocation, setCurrentLocation] =
+    useState<Coordinate | null>(null);
+
+  const [accuracy, setAccuracy] =
+    useState<number | null>(null);
+
+  const [result, setResult] =
+    useState<RouteResult | null>(null);
+
+  const [selectedId, setSelectedId] =
+    useState<string | null>(null);
+
+  const [error, setError] =
+    useState("");
+
+  const [analysisStage, setAnalysisStage] =
+    useState(0);
+
+  const [soundOn, setSoundOn] =
+    useState(true);
+
+  const musicRef =
+    useRef<HTMLAudioElement | null>(null);
+
+  const voiceRef =
+    useRef<HTMLAudioElement | null>(null);
+
+  const voiceUrlRef =
+    useRef<string | null>(null);
+
+  const selectedDiscovery = useMemo(
+    () =>
+      result?.discoveries.find(
+        (item) => item.id === selectedId,
+      ) ??
+      result?.discoveries[0] ??
+      null,
+    [result, selectedId],
+  );
+
+  useEffect(() => {
+    return () => {
+      musicRef.current?.pause();
+      musicRef.current = null;
+
+      voiceRef.current?.pause();
+      voiceRef.current = null;
+
+      if (voiceUrlRef.current) {
+        URL.revokeObjectURL(
+          voiceUrlRef.current,
+        );
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (phase !== "analysing") return;
+
+    setAnalysisStage(0);
+
+    const timer = window.setInterval(() => {
+      setAnalysisStage(
+        (value) => (value + 1) % 4,
+      );
+    }, 1400);
+
+    return () =>
+      window.clearInterval(timer);
+  }, [phase]);
+
+  function ensureMusic() {
+    if (!soundOn) return;
+
+    if (!musicRef.current) {
+      const audio = new Audio(
+        "/assets/storybgmusic/storybgmusic.mp3",
+      );
+
+      audio.loop = true;
+      audio.volume = 0.18;
+      musicRef.current = audio;
+    }
+
+    void musicRef.current.play().catch(() => {
+      // Browser autoplay policy can reject playback
+      // until the next user interaction.
+    });
+  }
+
+  function stopVoice() {
+    voiceRef.current?.pause();
+    voiceRef.current = null;
+
+    if (voiceUrlRef.current) {
+      URL.revokeObjectURL(
+        voiceUrlRef.current,
+      );
+      voiceUrlRef.current = null;
+    }
+  }
+
+  async function speak(text: string) {
+    if (!soundOn || !text.trim()) return;
+
+    stopVoice();
+
+    try {
+      const response = await fetch(
+        "/api/tts",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            text: text.trim(),
+          }),
+        },
+      );
+
+      if (!response.ok) return;
+
+      const blob =
+        await response.blob();
+
+      const url =
+        URL.createObjectURL(blob);
+
+      voiceUrlRef.current = url;
+
+      const audio =
+        new Audio(url);
+
+      audio.volume = 0.95;
+      voiceRef.current = audio;
+
+      audio.onended = () => {
+        if (voiceUrlRef.current === url) {
+          URL.revokeObjectURL(url);
+          voiceUrlRef.current = null;
+        }
+      };
+
+      await audio.play();
+    } catch {
+      // Narration is an enhancement; it should
+      // never break route exploration.
+    }
+  }
+
+  function toggleSound() {
+    const next = !soundOn;
+    setSoundOn(next);
+
+    if (!next) {
+      musicRef.current?.pause();
+      stopVoice();
+      return;
+    }
+
+    ensureMusic();
+  }
+
+  function locateTraveller() {
+    setError("");
+    ensureMusic();
+    setPhase("locating");
+
+    if (!navigator.geolocation) {
+      setError(
+        "This browser does not provide live location.",
+      );
+      setPhase("error");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const nextLocation = {
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+        };
+
+        setCurrentLocation(
+          nextLocation,
+        );
+
+        setAccuracy(
+          position.coords.accuracy,
+        );
+
+        setPhase("ready");
+
+        void speak(
+          "Live location locked. The journey begins at Delhi, Greater Noida. Your destination has been located. Reveal the route to discover what history lies between these two points.",
+        );
+      },
+      (locationError) => {
+        console.error(
+          "Geolocation error:",
+          locationError,
+        );
+
+        setError(
+          locationError.code === 1
+            ? "Location permission was denied. Allow location access in Chrome and try again."
+            : "We could not get a reliable live location. Please try again.",
+        );
+
+        setPhase("error");
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
+      },
+    );
+  }
+
+  async function revealJourney() {
+    if (!currentLocation) {
+      locateTraveller();
+      return;
+    }
+
+    ensureMusic();
+    stopVoice();
+    setError("");
+    setPhase("analysing");
+
+    try {
+      const response =
+        await fetch(
+          "/api/route-explorer",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              start: DELHI_ORIGIN,
+              end: currentLocation,
+            }),
+          },
+        );
+
+      const payload =
+        (await response.json()) as {
+          success?: boolean;
+          data?: RouteResult;
+          error?: string;
+        };
+
+      if (
+        !response.ok ||
+        !payload.success ||
+        !payload.data
+      ) {
+        throw new Error(
+          payload.error ??
+            "The route could not be reconstructed.",
+        );
+      }
+
+      setResult(payload.data);
+      setSelectedId(
+        payload.data.discoveries[0]?.id ??
+          null,
+      );
+      setPhase("complete");
+
+      const firstThree =
+        payload.data.discoveries
+          .slice(0, 3)
+          .map(
+            (place, index) =>
+              `Discovery ${index + 1}: ${place.name}. ${clampText(
+                place.history,
+                150,
+              )}`,
+          )
+          .join(" ");
+
+      const destination =
+        payload.data.destination.name;
+
+      void speak(
+        `Journey decoded. You travelled ${payload.data.route.distanceKm} kilometres from Delhi to ${destination}. The route takes about ${payload.data.route.durationMin} minutes. ${
+          payload.data.discoveries.length
+        } verified historical discoveries were found along the route. ${
+          firstThree ||
+          "No verified historical site was found on this route segment."
+        }`,
+      );
+    } catch (routeError) {
+      console.error(
+        "Route Explorer error:",
+        routeError,
+      );
+
+      setError(
+        routeError instanceof Error
+          ? routeError.message
+          : "Route reconstruction failed.",
+      );
+
+      setPhase("error");
+    }
+  }
+
+  function resetRoute() {
+    stopVoice();
+    setResult(null);
+    setCurrentLocation(null);
+    setAccuracy(null);
+    setSelectedId(null);
+    setError("");
+    setPhase("idle");
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth",
+    });
+  }
+
+  function speakDiscovery(
+    discovery: Discovery,
+  ) {
+    void speak(
+      `${discovery.name}. ${
+        discovery.category
+      }. ${discovery.history}`,
+    );
+  }
+
+  const routePoints =
+    result?.route.coordinates ?? [];
+
+  const mapBounds = useMemo(() => {
+    if (!routePoints.length) return null;
+
+    const lats = routePoints.map(
+      (point) => point.lat,
+    );
+    const lons = routePoints.map(
+      (point) => point.lon,
+    );
+
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+
+    return {
+      minLat:
+        minLat -
+        Math.max(
+          (maxLat - minLat) * 0.12,
+          0.001,
+        ),
+      maxLat:
+        maxLat +
+        Math.max(
+          (maxLat - minLat) * 0.12,
+          0.001,
+        ),
+      minLon:
+        minLon -
+        Math.max(
+          (maxLon - minLon) * 0.12,
+          0.001,
+        ),
+      maxLon:
+        maxLon +
+        Math.max(
+          (maxLon - minLon) * 0.12,
+          0.001,
+        ),
+    };
+  }, [routePoints]);
+
+  function project(point: Coordinate) {
+    if (!mapBounds) {
+      return {
+        x: 500,
+        y: 250,
+      };
+    }
+
+    const x =
+      ((point.lon - mapBounds.minLon) /
+        (mapBounds.maxLon -
+          mapBounds.minLon)) *
+      1000;
+
+    const y =
+      (1 -
+        (point.lat - mapBounds.minLat) /
+          (mapBounds.maxLat -
+            mapBounds.minLat)) *
+      520;
+
+    return {
+      x,
+      y,
+    };
+  }
+
+  const routePath = routePoints
+    .map((point, index) => {
+      const position =
+        project(point);
+
+      return `${
+        index === 0 ? "M" : "L"
+      } ${position.x.toFixed(
+        2,
+      )} ${position.y.toFixed(2)}`;
+    })
+    .join(" ");
+
+  const destinationLabel =
+    result?.destination.name ??
+    "Your location";
+
+  return (
+    <main className="rx2-page">
+      <div className="rx2-bg" />
+      <div className="rx2-vignette" />
+      <div className="rx2-noise" />
+
+      <header className="rx2-header">
+        <Link
+          href="/"
+          className="rx2-brand"
+          aria-label="Back to Reality Unknown"
+        >
+          <img
+            src="/assets/applogo/reality_unknown_logo.png"
+            alt="Reality Unknown"
+          />
+        </Link>
+
+        <div className="rx2-status">
+          <span className="rx2-status-dot" />
+          ROUTE INTELLIGENCE
+          <b>ACTIVE</b>
+        </div>
+
+        <div className="rx2-header-actions">
+          <button
+            type="button"
+            onClick={toggleSound}
+            className="rx2-sound"
+          >
+            {soundOn ? "SOUND ON" : "SOUND OFF"}
+          </button>
+
+          <Link
+            href="/"
+            className="rx2-exit"
+          >
+            EXIT ↗
+          </Link>
+        </div>
+      </header>
+
+      <AnimatePresence mode="wait">
+        {phase === "idle" && (
+          <motion.section
+            key="idle"
+            className="rx2-launch"
+            initial={{
+              opacity: 0,
+              y: 24,
+            }}
+            animate={{
+              opacity: 1,
+              y: 0,
+            }}
+            exit={{
+              opacity: 0,
+              y: -18,
+            }}
+          >
+            <div className="rx2-kicker">
+              TRAVELLER MODE / FIELD CHAPTER
+            </div>
+
+            <h1>
+              Follow the road.
+              <em>
+                Recover the history.
+              </em>
+            </h1>
+
+            <p className="rx2-lead">
+              Start at Delhi. Reality
+              Unknown maps your live journey
+              and looks for verified historical
+              places along the route.
+            </p>
+
+            <div className="rx2-route-brief">
+              <div className="rx2-point">
+                <span className="rx2-point-letter">
+                  A
+                </span>
+                <div>
+                  <small>
+                    ROUTE ORIGIN
+                  </small>
+                  <strong>
+                    DELHI
+                  </strong>
+                  <span>
+                    GREATER NOIDA
+                  </span>
+                </div>
+              </div>
+
+              <div className="rx2-connector">
+                <i />
+                <i />
+                <i />
+                <span>LIVE</span>
+              </div>
+
+              <div className="rx2-point">
+                <span className="rx2-point-letter">
+                  B
+                </span>
+                <div>
+                  <small>
+                    DESTINATION
+                  </small>
+                  <strong>
+                    YOUR LOCATION
+                  </strong>
+                  <span>
+                    LIVE GPS
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="rx2-primary"
+              onClick={locateTraveller}
+            >
+              <span>
+                FIND MY LOCATION
+              </span>
+              <b>→</b>
+            </button>
+
+            <div className="rx2-trust">
+              <span>GPS</span>
+              <i />
+              <span>
+                LOCATION STAYS IN YOUR
+                BROWSER UNTIL ROUTE IS
+                REQUESTED
+              </span>
+            </div>
+          </motion.section>
+        )}
+
+        {phase === "locating" && (
+          <motion.section
+            key="locating"
+            className="rx2-state"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div className="rx2-radar">
+              <span />
+              <span />
+              <span />
+              <b>GPS</b>
+            </div>
+
+            <div className="rx2-kicker">
+              LIVE LOCATION / ACQUIRING
+            </div>
+
+            <h2>
+              Finding where
+              <em>you are.</em>
+            </h2>
+
+            <p>
+              Hold for a moment. Reality
+              Unknown is requesting a precise
+              browser location so the journey
+              can end exactly where you are.
+            </p>
+          </motion.section>
+        )}
+
+        {phase === "ready" &&
+          currentLocation && (
+            <motion.section
+              key="ready"
+              className="rx2-ready"
+              initial={{
+                opacity: 0,
+                y: 18,
+              }}
+              animate={{
+                opacity: 1,
+                y: 0,
+              }}
+              exit={{
+                opacity: 0,
+                y: -18,
+              }}
+            >
+              <div className="rx2-kicker">
+                LIVE LOCATION / LOCKED
+              </div>
+
+              <div className="rx2-ready-grid">
+                <div>
+                  <h2>
+                    The destination
+                    <em>is found.</em>
+                  </h2>
+
+                  <p>
+                    Your current position
+                    will be used only as the
+                    end of this demo route.
+                  </p>
+
+                  <div className="rx2-live-location">
+                    <span className="rx2-live-dot" />
+                    <div>
+                      <small>
+                        YOUR LOCATION
+                      </small>
+                      <strong>
+                        LIVE LOCATION
+                      </strong>
+                      <span>
+                        GPS LOCKED
+                        {accuracy
+                          ? ` • ±${Math.round(
+                              accuracy,
+                            )} m`
+                          : ""}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rx2-journey-preview">
+                  <span>A</span>
+                  <strong>
+                    DELHI
+                  </strong>
+                  <i />
+                  <span>B</span>
+                  <strong>
+                    YOUR LOCATION
+                  </strong>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="rx2-primary rx2-primary-wide"
+                onClick={revealJourney}
+              >
+                <span>
+                  REVEAL MY JOURNEY
+                </span>
+                <b>↗</b>
+              </button>
+            </motion.section>
+          )}
+
+        {phase === "analysing" && (
+          <motion.section
+            key="analysing"
+            className="rx2-state rx2-analysis"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div className="rx2-analysis-orbit">
+              <div className="rx2-analysis-core">
+                RU
+              </div>
+              <i />
+              <i />
+              <i />
+            </div>
+
+            <div className="rx2-kicker">
+              JOURNEY DECODED / BUILDING
+            </div>
+
+            <h2>
+              Reading the road
+              <em>between you.</em>
+            </h2>
+
+            <div className="rx2-analysis-steps">
+              {[
+                "MAPPING THE ROUTE",
+                "SEARCHING HISTORICAL RECORDS",
+                "VERIFYING PLACES",
+                "BUILDING YOUR CHAPTER",
+              ].map(
+                (step, index) => (
+                  <div
+                    key={step}
+                    className={
+                      index <=
+                      analysisStage
+                        ? "active"
+                        : ""
+                    }
+                  >
+                    <span>
+                      0{index + 1}
+                    </span>
+                    <strong>
+                      {step}
+                    </strong>
+                    <i />
+                  </div>
+                ),
+              )}
+            </div>
+          </motion.section>
+        )}
+
+        {phase === "error" && (
+          <motion.section
+            key="error"
+            className="rx2-state"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          >
+            <div className="rx2-error-mark">
+              !
+            </div>
+
+            <div className="rx2-kicker">
+              ROUTE INTELLIGENCE / SIGNAL LOST
+            </div>
+
+            <h2>
+              We could not
+              <em>decode the journey.</em>
+            </h2>
+
+            <p>{error}</p>
+
+            <div className="rx2-error-actions">
+              <button
+                type="button"
+                className="rx2-primary"
+                onClick={locateTraveller}
+              >
+                TRY AGAIN
+                <b>↻</b>
+              </button>
+
+              <Link
+                href="/"
+                className="rx2-secondary"
+              >
+                RETURN HOME
+              </Link>
+            </div>
+          </motion.section>
+        )}
+
+        {phase === "complete" &&
+          result && (
+            <motion.section
+              key="complete"
+              className="rx2-results"
+              initial={{
+                opacity: 0,
+                y: 18,
+              }}
+              animate={{
+                opacity: 1,
+                y: 0,
+              }}
+            >
+              <div className="rx2-results-hero">
+                <div>
+                  <div className="rx2-kicker">
+                    JOURNEY DECODED
+                  </div>
+
+                  <h2>
+                    Your route
+                    <em>
+                      has a history.
+                    </em>
+                  </h2>
+
+                  <p>
+                    Delhi →{" "}
+                    {destinationLabel}
+                  </p>
+                </div>
+
+                <div className="rx2-stats">
+                  <div>
+                    <small>
+                      DISTANCE
+                    </small>
+                    <strong>
+                      {result.route.distanceKm}
+                      <span> km</span>
+                    </strong>
+                  </div>
+
+                  <div>
+                    <small>
+                      EST. TRAVEL
+                    </small>
+                    <strong>
+                      {result.route.durationMin}
+                      <span> min</span>
+                    </strong>
+                  </div>
+
+                  <div>
+                    <small>
+                      VERIFIED HISTORY
+                    </small>
+                    <strong>
+                      {result.discoveries.length}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rx2-map-shell">
+                <div className="rx2-map-topline">
+                  <span>
+                    ROUTE / A → B
+                  </span>
+                  <span>
+                    DELHI
+                    <i />
+                    {destinationLabel}
+                  </span>
+                </div>
+
+                <div className="rx2-map">
+                  <div className="rx2-map-grid" />
+
+                  <svg
+                    viewBox="0 0 1000 520"
+                    preserveAspectRatio="none"
+                    aria-label="Journey route map"
+                  >
+                    <path
+                      d={routePath}
+                      className="rx2-route-glow"
+                    />
+                    <path
+                      d={routePath}
+                      className="rx2-route-path"
+                    />
+
+                    {result.discoveries.map(
+                      (
+                        discovery,
+                        index,
+                      ) => {
+                        const position =
+                          project({
+                            lat: discovery.lat,
+                            lon: discovery.lon,
+                          });
+
+                        const active =
+                          selectedId ===
+                          discovery.id;
+
+                        return (
+                          <g
+                            key={
+                              discovery.id
+                            }
+                            className={
+                              active
+                                ? "rx2-map-node active"
+                                : "rx2-map-node"
+                            }
+                            onClick={() => {
+                              setSelectedId(
+                                discovery.id,
+                              );
+                              void speakDiscovery(
+                                discovery,
+                              );
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            <circle
+                              cx={position.x}
+                              cy={position.y}
+                              r={
+                                active
+                                  ? 10
+                                  : 6
+                              }
+                            />
+                            <text
+                              x={
+                                position.x +
+                                13
+                              }
+                              y={
+                                position.y -
+                                12
+                              }
+                            >
+                              {String(
+                                index + 1,
+                              ).padStart(
+                                2,
+                                "0",
+                              )}
+                            </text>
+                          </g>
+                        );
+                      },
+                    )}
+                  </svg>
+
+                  <div className="rx2-map-node-label rx2-map-start">
+                    <span>A</span>
+                    <strong>
+                      DELHI
+                    </strong>
+                  </div>
+
+                  <div className="rx2-map-node-label rx2-map-end">
+                    <span>B</span>
+                    <strong>
+                      YOU
+                    </strong>
+                  </div>
+
+                  <a
+                    className="rx2-map-attribution"
+                    href="https://www.openstreetmap.org/copyright"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Map data © OpenStreetMap contributors
+                  </a>
+                </div>
+              </div>
+
+              <div className="rx2-route-dossier">
+                <div className="rx2-dossier-main">
+                  <div className="rx2-section-head">
+                    <div>
+                      <span>
+                        01 / WHAT YOU PASSED
+                      </span>
+                      <h3>
+                        Historical
+                        <em>
+                          discoveries.
+                        </em>
+                      </h3>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="rx2-listen"
+                      onClick={() =>
+                        speak(
+                          `Historical discoveries along your route. ${result.discoveries
+                            .map(
+                              (
+                                discovery,
+                                index,
+                              ) =>
+                                `Discovery ${
+                                  index + 1
+                                }, ${
+                                  discovery.name
+                                }. ${clampText(
+                                  discovery.history,
+                                  130,
+                                )}`,
+                            )
+                            .join(" ")}`,
+                        )
+                      }
+                    >
+                      ◉ LISTEN
+                    </button>
+                  </div>
+
+                  {result.discoveries.length >
+                  0 ? (
+                    <div className="rx2-discovery-list">
+                      {result.discoveries.map(
+                        (
+                          discovery,
+                          index,
+                        ) => (
+                          <button
+                            type="button"
+                            key={
+                              discovery.id
+                            }
+                            className={
+                              selectedId ===
+                              discovery.id
+                                ? "rx2-discovery active"
+                                : "rx2-discovery"
+                            }
+                            onClick={() => {
+                              setSelectedId(
+                                discovery.id,
+                              );
+                              speakDiscovery(
+                                discovery,
+                              );
+                            }}
+                          >
+                            <span className="rx2-discovery-index">
+                              {String(
+                                index + 1,
+                              ).padStart(
+                                2,
+                                "0",
+                              )}
+                            </span>
+
+                            <span className="rx2-discovery-copy">
+                              <small>
+                                {discovery.category.toUpperCase()}
+                              </small>
+
+                              <strong>
+                                {
+                                  discovery.name
+                                }
+                              </strong>
+
+                              <span>
+                                {formatDistance(
+                                  discovery.distanceFromRouteM,
+                                )}
+                              </span>
+                            </span>
+
+                            <span className="rx2-discovery-arrow">
+                              ↗
+                            </span>
+                          </button>
+                        ),
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rx2-empty-history">
+                      <span>
+                        NO VERIFIED SITE
+                      </span>
+                      <strong>
+                        This route segment
+                        did not contain a
+                        historical record
+                        strong enough to
+                        display.
+                      </strong>
+                      <p>
+                        Reality Unknown will
+                        never invent a landmark
+                        just to fill the map.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <aside className="rx2-dossier-side">
+                  <AnimatePresence
+                    mode="wait"
+                  >
+                    {selectedDiscovery ? (
+                      <motion.div
+                        key={
+                          selectedDiscovery.id
+                        }
+                        className="rx2-history-card"
+                        initial={{
+                          opacity: 0,
+                          y: 10,
+                        }}
+                        animate={{
+                          opacity: 1,
+                          y: 0,
+                        }}
+                      >
+                        <div className="rx2-history-card-top">
+                          <span>
+                            HISTORY RECORD
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              speakDiscovery(
+                                selectedDiscovery,
+                              )
+                            }
+                            aria-label="Read history aloud"
+                          >
+                            🔊
+                          </button>
+                        </div>
+
+                        {selectedDiscovery.imageUrl && (
+                          <img
+                            src={
+                              selectedDiscovery.imageUrl
+                            }
+                            alt=""
+                            className="rx2-history-image"
+                          />
+                        )}
+
+                        <h4>
+                          {
+                            selectedDiscovery.name
+                          }
+                        </h4>
+
+                        <div className="rx2-history-meta">
+                          <span>
+                            {selectedDiscovery.category.toUpperCase()}
+                          </span>
+
+                          {selectedDiscovery.period && (
+                            <span>
+                              {
+                                selectedDiscovery.period
+                              }
+                            </span>
+                          )}
+                        </div>
+
+                        <p>
+                          {
+                            selectedDiscovery.history
+                          }
+                        </p>
+
+                        <div className="rx2-history-source">
+                          <span>
+                            SOURCE
+                          </span>
+
+                          <a
+                            href={
+                              selectedDiscovery.sourceUrl
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {
+                              selectedDiscovery.source
+                            }{" "}
+                            ↗
+                          </a>
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="route-context"
+                        className="rx2-context-card"
+                        initial={{
+                          opacity: 0,
+                        }}
+                        animate={{
+                          opacity: 1,
+                        }}
+                      >
+                        <span>
+                          ROUTE CONTEXT
+                        </span>
+
+                        <h4>
+                          {result.routeContext
+                            ?.title ??
+                            "The story between the points"}
+                        </h4>
+
+                        <p>
+                          {result.routeContext
+                            ?.history ??
+                            "Select a discovery on the route to open its verified historical record."}
+                        </p>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </aside>
+              </div>
+
+              {result.routeContext && (
+                <section className="rx2-context-strip">
+                  <div className="rx2-context-number">
+                    02
+                  </div>
+
+                  <div>
+                    <span>
+                      THE LARGER STORY
+                    </span>
+
+                    <h3>
+                      {
+                        result.routeContext
+                          .title
+                      }
+                    </h3>
+
+                    <p>
+                      {
+                        result.routeContext
+                          .history
+                      }
+                    </p>
+
+                    <a
+                      href={
+                        result.routeContext
+                          .sourceUrl
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      OPEN HISTORICAL RECORD ↗
+                    </a>
+                  </div>
+                </section>
+              )}
+
+              <div className="rx2-final">
+                <span>
+                  REALITY UNKNOWN
+                </span>
+
+                <h3>
+                  You did not just
+                  <em>travel through it.</em>
+                </h3>
+
+                <p>
+                  You travelled through
+                  a layer of its history.
+                </p>
+
+                <div className="rx2-final-actions">
+                  <button
+                    type="button"
+                    className="rx2-primary"
+                    onClick={resetRoute}
+                  >
+                    EXPLORE ANOTHER ROUTE
+                    <b>↻</b>
+                  </button>
+
+                  <Link
+                    href="/"
+                    className="rx2-secondary"
+                  >
+                    RETURN TO REALITY
+                  </Link>
+                </div>
+              </div>
+
+              <footer className="rx2-footer">
+                <span>
+                  Route geometry:
+                  OpenStreetMap /
+                  OSRM
+                </span>
+
+                <span>
+                  Historical records:
+                  Wikimedia
+                </span>
+
+                <span>
+                  © Reality Unknown
+                </span>
+              </footer>
+            </motion.section>
+          )}
+      </AnimatePresence>
+    </main>
+  );
+}

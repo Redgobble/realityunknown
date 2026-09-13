@@ -192,21 +192,6 @@ export function EnterRealityPage() {
 
           </button>
 
-          <Link
-            href="/route-explorer"
-            className="ru-enter-route-option"
-          >
-            <span className="ru-enter-route-icon">⌁</span>
-
-            <span className="ru-enter-route-copy">
-              <small>TRAVELLER MODE</small>
-              <strong>EXPLORE MY ROUTE</strong>
-            </span>
-
-            <b>↗</b>
-          </Link>
-
-
           {active && (
             <motion.div
               className="ru-enter-detected"

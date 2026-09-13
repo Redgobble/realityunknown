@@ -1,0 +1,940 @@
+REALITY UNKNOWN
+VIVA AND PRESENTATION GUIDE
+
+Project: Reality Unknown
+Repository: github.com/Redgobble/realityunknown
+Technology: Next.js App Router, React, TypeScript, Framer Motion, OpenRouter AI
+
+======================================================================
+1. PROJECT IN ONE MINUTE
+======================================================================
+
+Reality Unknown is an AI-assisted cinematic discovery game for the real
+world. A player captures a photograph of a place or object. The system
+analyzes the visible scene, creates a grounded discovery story, gives the
+player a clue or mission, and then checks a second photograph to decide
+whether the player found the intended target.
+
+The central idea is:
+
+    See -> Question -> Discover -> Investigate -> Validate -> Earn XP
+
+The project combines:
+
+- A responsive Next.js web application.
+- Camera capture for real-world exploration.
+- Multimodal AI for image understanding.
+- Text generation for stories, clues, riddles, and questions.
+- AI-generated narration through text-to-speech.
+- A game state machine with chapters, objectives, XP, success, and failure.
+- Cinematic presentation using motion, backgrounds, characters, and audio.
+
+Important clarification for viva:
+
+This project does not train a new artificial intelligence model. It uses
+existing AI models through the OpenRouter API. The project adds application
+logic, carefully designed prompts, structured JSON handling, validation rules,
+and a game experience around those models.
+
+======================================================================
+2. MAIN OBJECTIVE
+======================================================================
+
+The objective is to make learning and exploration more interactive.
+Instead of showing a normal information page about a monument or object,
+Reality Unknown turns the observation into a playable investigation.
+
+A player should be able to:
+
+1. Enter the Reality Unknown experience.
+2. Enter a name and begin a discovery.
+3. Capture or upload an image from the camera interface.
+4. Receive an AI analysis of visible objects and the environment.
+5. Read or listen to a generated story.
+6. Answer a story question.
+7. Follow a clue or mission.
+8. Capture another image of the target.
+9. Receive AI validation and XP.
+10. Continue to the next discovery.
+
+======================================================================
+3. USER FLOW
+======================================================================
+
+LANDING PAGE
+    |
+    v
+ENTER REALITY
+    |
+    v
+PLAYER IDENTITY
+    |
+    v
+CAMERA CAPTURE
+    |
+    v
+VISION ANALYSIS
+    |
+    v
+GAME MASTER STORY
+    |
+    v
+STORY, CHARACTER, CLUE, AND QUESTION
+    |
+    v
+TARGET CAMERA CAPTURE
+    |
+    v
+TARGET VALIDATION
+    |
+    +--------------------+
+    |                    |
+    v                    v
+SUCCESS                FAILURE
+Add XP                 Try again / continue
+    |
+    v
+NEXT DISCOVERY
+
+The important design decision is that the first image creates the context,
+and the second image is used to validate the mission target.
+
+======================================================================
+4. HOW AI WORKS IN THIS PROJECT
+======================================================================
+
+The AI pipeline contains five major jobs:
+
+A. Vision analysis
+B. Game-master story generation
+C. Curiosity answering
+D. Target validation
+E. Text-to-speech narration
+
+The browser does not call OpenRouter directly. It calls Next.js server API
+routes. The server routes use the secret OPENROUTER_API_KEY and communicate
+with OpenRouter. This keeps the provider credential out of browser code.
+
+The shared helper is:
+
+    lib/ai/openrouter.ts
+
+This helper sends a POST request to:
+
+    https://openrouter.ai/api/v1/chat/completions
+
+It sends:
+
+- The selected model.
+- System and user messages.
+- Optional image content.
+- Temperature.
+- Maximum token limit.
+- Authorization header.
+
+The helper returns the first usable text response from:
+
+    choices[0].message.content
+
+If the key is missing, the response fails with an error. If the provider
+returns no usable text, the helper also reports an error.
+
+======================================================================
+5. STEP A: VISION ANALYSIS
+======================================================================
+
+Client file:
+
+    components/game/DiscoveryGame.tsx
+
+Server route:
+
+    app/api/vision/route.ts
+
+The client function createDiscovery(image) sends:
+
+    POST /api/vision
+
+with JSON similar to:
+
+    {
+      "image": "data:image/..."
+    }
+
+The vision route sends two content parts to the model:
+
+1. A text prompt explaining the observation task.
+2. An image_url content part containing the camera image.
+
+This is a multimodal request because the model receives both text and an
+image. The prompt tells the model to analyze only what is genuinely visible.
+
+The requested output is JSON containing fields such as:
+
+- environment
+- placeType
+- setting
+- landmarkCandidate
+- historicalCandidate
+- objects
+- visualClues
+- storyPotential
+- confidence
+
+The prompt includes anti-hallucination rules:
+
+- Never invent an object.
+- Never claim a historical fact without evidence.
+- If the exact landmark is unknown, describe visible evidence.
+- Mark a place as potentially historical rather than claiming certainty.
+- Limit the number of objects and clues.
+- Keep confidence between 0 and 1.
+
+Why this step exists:
+
+The game master should not receive an unstructured image alone. It first
+receives a structured snapshot of the scene. This creates a boundary between
+what the camera appears to show and the generated game narrative.
+
+======================================================================
+6. STEP B: GAME MASTER STORY GENERATION
+======================================================================
+
+Client file:
+
+    components/game/DiscoveryGame.tsx
+
+Server route:
+
+    app/api/game-master/route.ts
+
+After vision succeeds, the client stores the snapshot as world state and
+sends it to:
+
+    POST /api/game-master
+
+The request contains:
+
+- playerName
+- discoveryNumber
+- world
+
+The game-master prompt is responsible for transforming the real-world
+snapshot into a playable story. It explicitly says that the story must be
+grounded in the photograph.
+
+The game master must return structured JSON containing:
+
+- discoveryTitle
+- locationType
+- subject
+- confidence
+- historicalStory
+- storyBeats
+- historicalDetails
+- characterOpening
+- characterDialogue
+- storyQuestion
+- storyQuestionOptions
+- storyQuestionAnswer
+- storyQuestionExplanation
+- curiosityQuestions
+- visualQuestions
+- riddleTitle
+- riddle
+- clue
+- objective
+- targetHint
+- rewardXp
+
+The prompt also imposes exact constraints:
+
+- Exactly three story beats.
+- Exactly four answer choices.
+- The correct answer is a zero-based index.
+- Exactly three curiosity questions.
+- Exactly three visual questions.
+- Exactly three historical details.
+- Reward XP must be between 80 and 200.
+- Voice text must be short enough to speak naturally.
+
+This is an example of prompt-based structured generation. The application
+uses instructions to make a general-purpose language model behave like a
+specific game master with a predictable output contract.
+
+The client then stores the generated story and changes the game phase to
+"choice".
+
+======================================================================
+7. STEP C: CURIOSITY QUESTIONS
+======================================================================
+
+Server route:
+
+    app/api/curiosity/route.ts
+
+The player can ask a question about the current discovery. The route sends
+the question and the generated story to the model.
+
+The prompt says:
+
+- Answer only from the supplied discovery context.
+- Be specific to the discovery.
+- Do not invent historical facts.
+- Preserve uncertainty.
+- Answer in two or three short paragraphs.
+- Return JSON with an answer field.
+- Do not mention that the response came from an AI.
+
+This design reduces unsupported answers because the model is not asked to
+answer from unlimited general knowledge. It is asked to answer using the
+current story context.
+
+======================================================================
+8. STEP D: TARGET VALIDATION
+======================================================================
+
+Client function:
+
+    validateTarget(image)
+
+Server route:
+
+    app/api/validation/route.ts
+
+The player captures a second image after receiving a mission. The client
+sends:
+
+- The new image.
+- The original world snapshot.
+- The generated story.
+- The player name.
+
+The validation model compares the new photograph with the mission target.
+It returns JSON containing:
+
+- valid
+- confidence
+- matchedObject
+- reason
+- feedback
+- xp
+
+The server does not blindly trust the model's valid flag. It applies an
+additional application rule:
+
+    valid = result.valid === true AND confidence >= 0.62
+
+This is an important point for the viva. The final decision is a combination
+of model output and deterministic application logic.
+
+If validation is true:
+
+- The client adds the returned XP.
+- The game moves to the success phase.
+
+If validation is false:
+
+- The game moves to the failure phase.
+- The player can receive feedback and try again.
+
+XP is also clamped by the route:
+
+- Valid results receive between 80 and 180 XP.
+- Invalid results receive 0 XP.
+
+======================================================================
+9. STEP E: TEXT-TO-SPEECH
+======================================================================
+
+Server route:
+
+    app/api/tts/route.ts
+
+The narration route receives text and sends it to the OpenRouter audio
+endpoint:
+
+    https://openrouter.ai/api/v1/audio/speech
+
+The route checks that:
+
+- Text exists.
+- Text is not longer than 3000 characters.
+- OPENROUTER_API_KEY exists.
+
+It requests MP3 audio and returns the binary audio response with:
+
+    Content-Type: audio/mpeg
+
+The default voice model and voice can be overridden with environment
+variables. This makes narration configurable without changing code.
+
+======================================================================
+10. DATA FLOW AND COMPONENT ARCHITECTURE
+======================================================================
+
+Main page files:
+
+    app/page.tsx
+    app/discovery/page.tsx
+    app/enter-reality/page.tsx
+
+The main discovery route renders:
+
+    components/game/DiscoveryGame.tsx
+
+DiscoveryGame is a client component because it needs:
+
+- React state.
+- Camera interaction.
+- Browser APIs.
+- Fetch requests.
+- User event handlers.
+- Dynamic game phases.
+
+Important state includes:
+
+- phase
+- playerName
+- world
+- story
+- XP
+- discoveryCount
+- selectedQuestion
+- targetImage
+- error
+
+The game phase controls which screen the player sees. Examples include:
+
+- identity
+- discovery
+- camera
+- analyzing
+- choice
+- story
+- mission
+- target
+- validating
+- success
+- failure
+
+This is a state-machine style design. It is easier to reason about than
+allowing every screen to independently decide what should happen next.
+
+======================================================================
+11. WHY SERVER API ROUTES ARE USED
+======================================================================
+
+The browser calls local routes such as /api/vision instead of calling
+OpenRouter directly.
+
+Advantages:
+
+1. Secret protection
+   The OpenRouter API key remains on the server.
+
+2. Prompt protection
+   Important system prompts are not fully exposed as client-side source.
+
+3. Centralized error handling
+   Each route can return a consistent success/error response.
+
+4. Provider abstraction
+   The application can change the model provider without rewriting the UI.
+
+5. Validation boundary
+   The server can check required input and apply confidence thresholds.
+
+6. Cost and request control
+   Maximum tokens, temperature, and text-length limits can be applied on
+   the server.
+
+======================================================================
+12. JSON AND ERROR HANDLING
+======================================================================
+
+AI text is not automatically reliable JSON. The project includes:
+
+    lib/ai/parseJson.ts
+
+The parseAIJson helper:
+
+1. Removes JSON markdown fences if the model adds them.
+2. Trims whitespace.
+3. Attempts normal JSON.parse.
+4. If necessary, extracts the text between the first and last braces.
+5. Throws an error if no usable JSON is found.
+
+The game routes also perform input checks before calling the model. Examples:
+
+- Missing camera image returns HTTP 400.
+- Missing world or story for validation returns HTTP 400.
+- Missing question or story for curiosity returns HTTP 400.
+- Missing API key returns an error.
+- Provider failures are logged on the server and returned as safe messages.
+
+The client catches failures, displays an error state, and moves the game back
+to a usable phase instead of leaving the player in an endless loading state.
+
+======================================================================
+13. PROMPT ENGINEERING USED IN THE PROJECT
+======================================================================
+
+Prompt engineering means designing instructions so a general AI model gives
+useful, safe, and predictable output.
+
+Techniques used here:
+
+1. Role prompting
+   The model is assigned a role such as World Observer, Game Master, Watcher,
+   or final validation system.
+
+2. Output schema
+   The prompts show the exact JSON structure expected by the application.
+
+3. Grounding
+   The model is told to use the supplied image or discovery snapshot rather
+   than inventing unsupported facts.
+
+4. Negative constraints
+   The prompts explicitly list what must not be invented: dates, people,
+   rulers, events, objects, inscriptions, and historical claims.
+
+5. Cardinality constraints
+   The prompt specifies exact counts, such as three story beats and four
+   answer choices.
+
+6. Confidence values
+   The model reports confidence, which is later used by application logic.
+
+7. Temperature control
+   Vision and validation use low temperature for more consistent decisions.
+   Story generation uses a higher temperature for controlled creativity.
+
+8. Token limits
+   maxTokens prevents unnecessarily long responses and controls cost.
+
+======================================================================
+14. AI MODEL VERSUS APPLICATION LOGIC
+======================================================================
+
+AI responsibilities:
+
+- Interpret visible image content.
+- Suggest descriptions and possible categories.
+- Generate story language.
+- Create questions, clues, and feedback.
+- Compare a target image with a mission context.
+- Generate narration audio.
+
+Application responsibilities:
+
+- Capture and transmit images.
+- Store game state.
+- Decide which phase is visible.
+- Check required request fields.
+- Parse the model response.
+- Apply the validation confidence threshold.
+- Clamp XP values.
+- Handle errors.
+- Keep the API key private.
+- Navigate the player through the experience.
+
+This separation is essential. The AI generates content, but the application
+controls the rules and the user experience.
+
+======================================================================
+15. SECURITY AND PRIVACY DISCUSSION
+======================================================================
+
+Current protections:
+
+- API key is stored in server environment variables.
+- The key is not sent to the browser.
+- AI requests happen in Node.js server routes.
+- Text-to-speech input is limited to 3000 characters.
+- Required fields are checked before provider calls.
+- The server does not trust the validation flag alone; it checks confidence.
+- AI output is parsed before being used by the client.
+
+Important production improvements:
+
+- Add authentication and user session management.
+- Add rate limiting to every AI route.
+- Add image-size and image-type limits.
+- Avoid storing user images unless the user explicitly agrees.
+- Add stronger runtime schemas for every AI response.
+- Add abuse prevention and request quotas.
+- Remove localhost-only provider headers for production deployment.
+- Add monitoring without logging sensitive image content.
+
+A good viva answer is:
+
+"The current prototype protects the provider key by keeping all AI calls on
+server routes. For production, I would add authentication, rate limiting,
+strict schema validation, image limits, and a clear image-retention policy."
+
+======================================================================
+16. LIMITATIONS
+======================================================================
+
+1. AI can still make mistakes.
+   Prompt instructions reduce hallucination but cannot guarantee truth.
+
+2. Vision depends on image quality.
+   A dark, blurry, or incomplete image can reduce confidence.
+
+3. Landmark identification is uncertain.
+   The system should describe visible evidence instead of claiming an exact
+   identity without support.
+
+4. API availability affects the game.
+   If OpenRouter is unavailable, AI-dependent phases cannot complete.
+
+5. AI costs scale with usage.
+   Each discovery may use vision, story, validation, curiosity, and TTS calls.
+
+6. JSON generation can fail.
+   The parser handles common formatting mistakes, but malformed output can
+   still require a retry or fallback.
+
+7. Browser camera permissions are required.
+   Camera functionality depends on secure browser context and user approval.
+
+8. The prototype has no persistent account database.
+   XP and progress are currently managed in the active client experience.
+
+======================================================================
+17. TESTING AND VALIDATION PLAN
+======================================================================
+
+Manual functional tests:
+
+- Open the landing page.
+- Navigate to /enter-reality.
+- Enter a player name.
+- Allow camera permissions.
+- Capture a clear outdoor image.
+- Confirm that vision analysis returns a world snapshot.
+- Confirm that the game master produces the story structure.
+- Answer the story question.
+- Ask a specific curiosity question.
+- Capture the mission target.
+- Confirm both valid and invalid validation behavior.
+- Confirm that XP changes only for valid results.
+- Test missing API key behavior.
+- Test an empty image request.
+- Test a blurry or unrelated target image.
+
+Development checks:
+
+    npm run lint
+    npx tsc --noEmit
+    npm run build
+
+Useful automated test areas for future work:
+
+- Unit tests for parseAIJson.
+- API tests for missing and valid request bodies.
+- Tests for the 0.62 validation threshold.
+- Tests for XP clamping.
+- End-to-end camera and navigation tests.
+- Mocked AI provider tests so development does not depend on live API calls.
+
+======================================================================
+18. PRESENTATION PLAN: 10 SLIDES
+======================================================================
+
+SLIDE 1: TITLE
+
+Title: Reality Unknown
+Subtitle: An AI-assisted cinematic discovery game for the real world
+Say:
+"Reality Unknown transforms real-world images into interactive stories,
+missions, and discoveries using multimodal AI."
+
+SLIDE 2: PROBLEM
+
+- Traditional exploration apps are passive.
+- Information is often separated from interaction.
+- Users may see a landmark but not understand its context.
+- Static content does not create a strong sense of discovery.
+
+Say:
+"The problem is not only finding information. The problem is making people
+curious enough to investigate and remember it."
+
+SLIDE 3: SOLUTION
+
+- Capture a real scene.
+- Analyze visible evidence.
+- Generate a grounded story.
+- Give the player a mission.
+- Validate the next photograph.
+- Reward successful exploration.
+
+SLIDE 4: USER JOURNEY
+
+Show this flow:
+
+Capture -> Vision -> Story -> Question -> Mission -> Validation -> XP
+
+Explain that the first image creates context and the second image checks the
+mission target.
+
+SLIDE 5: SYSTEM ARCHITECTURE
+
+Browser / React UI
+        |
+        v
+Next.js API routes
+        |
+        v
+OpenRouter AI models
+        |
+        v
+Structured JSON or audio response
+        |
+        v
+Game state and cinematic UI
+
+Mention that the API key is kept on the server.
+
+SLIDE 6: AI PIPELINE
+
+- Vision route: image to structured world snapshot.
+- Game master: snapshot to story and mission.
+- Curiosity: story context plus question to answer.
+- Validation: target image plus mission to valid/invalid result.
+- TTS: story text to spoken audio.
+
+SLIDE 7: PROMPT ENGINEERING
+
+- Roles define model behavior.
+- JSON schemas create predictable output.
+- Grounding rules reduce hallucinations.
+- Exact counts make UI rendering reliable.
+- Temperature differs by task.
+- Confidence is combined with application rules.
+
+SLIDE 8: TECHNOLOGY
+
+- Next.js App Router.
+- React and TypeScript.
+- Framer Motion for cinematic transitions.
+- OpenRouter for AI access.
+- Browser camera APIs for capture.
+- Node.js server routes for secure provider calls.
+
+SLIDE 9: SAFETY AND LIMITATIONS
+
+- AI output is uncertain.
+- Images can be unclear.
+- API costs and availability matter.
+- Keys remain server-side.
+- Production needs rate limits, authentication, and strict schemas.
+
+SLIDE 10: DEMO AND FUTURE SCOPE
+
+Demo:
+- Start at landing page.
+- Enter reality.
+- Capture an object.
+- Show the generated story.
+- Ask a curiosity question.
+- Complete the validation mission.
+- Show XP reward.
+
+Future:
+- User accounts and persistent discoveries.
+- Map of discovered locations.
+- Better visual verification.
+- Offline-friendly capture queue.
+- More languages and accessibility options.
+- Human-reviewed historical sources.
+
+======================================================================
+19. SHORT PRESENTATION SCRIPT
+======================================================================
+
+"Reality Unknown is an AI-assisted discovery game that connects real-world
+observation with interactive storytelling. The player captures an image using
+the camera. Our vision route sends the image and a grounding prompt to a
+multimodal model, which returns a structured description of what is visible.
+
+That snapshot is sent to the game-master route. The game master creates a
+story, character dialogue, historical details, a question, a clue, and a
+mission. The player then photographs a target related to the mission. A
+validation route compares the new image with the original context and accepts
+it only when the model says it is valid and its confidence is at least 0.62.
+
+The browser communicates with our Next.js server routes, and the server talks
+to OpenRouter. This keeps the API key private. AI generates content, but our
+application controls state, validation thresholds, XP, error handling, and
+navigation. The result is a cinematic learning experience that turns a real
+place or object into a playable investigation."
+
+======================================================================
+20. COMMON VIVA QUESTIONS AND ANSWERS
+======================================================================
+
+Q1. What is the main purpose of the project?
+
+Answer:
+The purpose is to make real-world exploration interactive. The application
+uses a camera image as input, AI to interpret and narrate the discovery, and
+game mechanics to make the user investigate and learn.
+
+Q2. Is this a machine-learning model trained by your team?
+
+Answer:
+No. It is an AI-integrated application. It uses existing multimodal,
+language, and text-to-speech models through OpenRouter. Our contribution is
+the product architecture, prompts, API integration, structured output
+handling, validation logic, and game experience.
+
+Q3. Why do you use OpenRouter?
+
+Answer:
+OpenRouter provides a unified API for accessing different AI models. It lets
+the application choose or change models through environment variables while
+keeping the integration behind one server-side helper.
+
+Q4. Why not call OpenRouter from the browser?
+
+Answer:
+The API key would be exposed. The browser calls our Next.js API routes, and
+only the server communicates with OpenRouter.
+
+Q5. What is multimodal AI?
+
+Answer:
+Multimodal AI can process more than one kind of input, such as text and
+images. In this project the vision route sends both a written instruction and
+a camera image to the model.
+
+Q6. How do you reduce hallucination?
+
+Answer:
+The prompts instruct the model to use only visible evidence, avoid invented
+facts, preserve uncertainty, return confidence, and produce a limited JSON
+schema. The application also applies deterministic checks after the response.
+These steps reduce hallucination but do not make the model perfectly factual.
+
+Q7. What happens if the model returns Markdown instead of JSON?
+
+Answer:
+parseAIJson removes common JSON code fences and attempts to extract the object
+between the first and last braces. If parsing still fails, the route returns
+an error and the client displays a failure state.
+
+Q8. How does validation work?
+
+Answer:
+The player captures a second image. The validation route receives that image,
+the original world snapshot, and the mission story. The model returns valid
+and confidence. The server accepts the target only when valid is true and
+confidence is at least 0.62.
+
+Q9. Why use a confidence threshold?
+
+Answer:
+A model flag alone may be too permissive. The threshold creates a deterministic
+minimum for acceptance and avoids awarding XP for weak matches.
+
+Q10. Why is vision temperature low?
+
+Answer:
+Vision and validation are observation and decision tasks, so consistency is
+more important than creativity. A low temperature generally reduces random
+variation. Story generation uses a higher temperature because it needs some
+creative language while remaining grounded.
+
+Q11. What is the role of the game master?
+
+Answer:
+The game master converts structured visual observations into a playable
+narrative. It creates the title, story beats, dialogue, questions, riddle,
+clue, objective, target hint, and reward.
+
+Q12. What is the role of React state?
+
+Answer:
+React state stores the current player, world, story, XP, image, discovery
+number, selected answer, error, and current phase. State changes determine
+which part of the game interface is rendered.
+
+Q13. Why is DiscoveryGame a client component?
+
+Answer:
+It needs browser-only features such as camera access, user interaction,
+client state, timers, and fetch calls from the interface.
+
+Q14. What happens if the API key is missing?
+
+Answer:
+The OpenRouter helper or TTS route reports that OPENROUTER_API_KEY is missing.
+The client catches the error and returns to a usable error or discovery state.
+
+Q15. How is XP protected from incorrect values?
+
+Answer:
+The validation route gives invalid results zero XP. Valid XP is clamped to a
+range between 80 and 180. The client adds XP only after a valid response.
+
+Q16. What are the main limitations?
+
+Answer:
+AI can make mistakes, image quality affects analysis, live APIs cost money,
+and the prototype does not yet have persistent accounts. Production would
+need stronger schemas, rate limits, authentication, privacy controls, and
+source verification.
+
+Q17. How would you scale this project?
+
+Answer:
+I would add authentication, a database for users and discoveries, caching for
+repeated analysis, background jobs for narration, rate limits, observability,
+and model routing based on task cost and quality.
+
+Q18. How would you improve factual accuracy?
+
+Answer:
+I would connect identified locations to trusted historical data sources,
+store citations in the story response, require higher confidence for claims,
+and clearly label uncertain identification.
+
+Q19. How would you test the AI routes?
+
+Answer:
+I would unit-test input validation, JSON parsing, confidence thresholds, and
+XP clamping. I would mock OpenRouter for repeatable API tests and use
+end-to-end tests for the full capture-to-validation flow.
+
+Q20. What is the most important architectural decision?
+
+Answer:
+Separating AI provider calls into server routes is the most important decision.
+It protects secrets, centralizes prompts and errors, and lets the UI remain
+focused on game state and presentation.
+
+======================================================================
+21. FINAL VIVA SUMMARY
+======================================================================
+
+Remember these five lines:
+
+1. Reality Unknown is an AI-assisted real-world discovery game.
+2. Vision AI converts a camera image into a structured world snapshot.
+3. A game-master model converts that snapshot into story and mission content.
+4. A validation model checks the second target image, but the server applies
+   its own confidence threshold before awarding XP.
+5. Next.js server routes protect the API key and connect the AI system to the
+   React game interface.
+
+Best closing statement:
+
+"The project is not only an AI demo. It is an end-to-end application where
+AI is one part of a controlled system. The server manages security and
+validation, the client manages the interactive state machine, and the visual
+layer turns generated content into a cinematic discovery experience."
